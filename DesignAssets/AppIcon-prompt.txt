@@ -1,0 +1,5 @@
+Generated with the built-in image_gen tool. Transparent background requested.
+
+Create a single production macOS app icon for an indie developer tool named XcodeRunner. Square 1024x1024 composition. A clean rounded-square cobalt/azure blue tile, inset slightly with a transparent outer margin. Center one bold white geometric play triangle integrated into a simple white open code bracket outline, forming a distinctive run-code emblem. Modern restrained macOS icon with very subtle depth, crisp broad geometry, excellent readability at 18 pixels. No hammer, no text, no lettering, no numbers, no Apple logo, no Xcode logo, no mockup, no extra objects, no status badges. The emblem should occupy most of the tile and be centered, with ample safe padding. Transparent background outside rounded tile. Output just the finished icon artwork.
+
+The source image is resized with sips for the macOS AppIcon catalog and menu bar imageset. Status badges are composited at runtime using AppKit.

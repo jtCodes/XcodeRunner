@@ -1,0 +1,47 @@
+# XcodeRunner
+
+A native macOS dashboard for the Codex → Run → check your iPhone workflow. Xcode must be installed and configured, but its window can stay closed while XcodeRunner builds other apps.
+
+## First run
+
+1. Open `XcodeRunner.xcodeproj` in Xcode. Choose **My Mac** and your signing team, then run XcodeRunner once.
+2. Click **Add Project** and choose a broad folder to recursively import all its Xcode projects, or select one `.xcworkspace` / `.xcodeproj`. When a scan finds multiple projects, a review popup lists the new projects with all checked. Uncheck any to exclude them, use Select All / Deselect All, then confirm Import; Cancel adds nothing. Folder import prefers workspaces over projects they actually reference, resolves nested workspace references, collapses equivalent workspaces, skips empty/broken workspaces, skips dependency/generated folders and symlinks, and preserves already saved projects and settings. Scheme discovery runs sequentially with progress shown in the sidebar. Re-import the folder later to pick up newly created projects.
+3. Choose an app scheme and configuration on the page, then a paired iPhone/iPad or iOS simulator in the top toolbar. The destination menu groups real devices above simulators, with available devices first. Opening the destination list automatically refreshes devices and simulators.
+4. Press **Run** in the toolbar or **⌘R** to build, install, and launch. Other projects can be queued while one is running. **Stop** cancels the current run; queued runs continue.
+
+The target is macOS-only, with a macOS 14 minimum. App Sandbox is disabled because the app needs to execute development tools and read project folders; Hardened Runtime is enabled.
+
+## Behavior
+
+- A background-free, monochrome version of the run/code emblem stays visible in the macOS menu bar and adapts to light/dark appearance. Small static corner badges reflect status: orange hammer for build/preparation, arrow for installation, lock for unlock wait, green play for a tracked running app, red exclamation for a failed run, green checkmark for a completed run, and gray stop for app exit/cancellation. Idle shows the unbadged emblem. Its tooltip identifies the current activity. It opens quick controls for saved projects, device selection, Run/Queue/Stop, Launch Again, and app status. Closing the main window keeps XcodeRunner and its console sessions alive. Open Window restores the full dashboard; Quit shuts down active commands and console forwarders. The menu and main window share the same project settings and build queue.
+
+- Select sidebar projects with Command-click or Shift-click, then use **Remove**, the context menu, or Delete to remove one or several saved entries. Source files and folders stay on disk. Active/queued projects are kept until their runs finish or are cancelled/unqueued.
+- Projects and their settings persist in `~/Library/Application Support/XcodeRunner/projects.json`. Per-project build caches live alongside it in `DerivedData`.
+- Projects with no successful run show no Changes section or file-count badge. Source comparisons begin after the first successful run.
+- Filesystem events trigger source scans, never builds. File contents are hashed on a background task. The baseline advances only after a successful build, installation, and launch, using the snapshot taken **before** the build. Failed and cancelled runs preserve the previous baseline. Edits made during a run remain pending afterward.
+- Added, edited, and deleted files under the selected container’s parent folder are tracked, including uncommitted files. `.git`, `.build`, `build`, `DerivedData`, `node_modules`, `.swiftpm`, `xcuserdata`, and `.DS_Store` are ignored. Symlinks and files outside that folder are not tracked. Large dependency folders such as Pods are included, so source scans can take longer in large projects.
+- The run panel shows Prepare → Build → Install → Launch, current compiler/linker/signing/script activity, elapsed time, and observed build-activity / warning / error counts. A quiet tool shows time since its last output. These are parsed from Xcode’s text output; activity counts are observed actions, not completed tasks or a percentage estimate.
+- Builds are serialized across projects. Settings are locked for active or queued projects. Every queued run takes its source snapshot when it actually starts.
+- **Launch Again** reopens the last successfully run app on the same destination when settings match and the latest scan reports no changes. **Run** always builds, even when no source changes are detected.
+- The toolbar includes Run/Stop/Unqueue, a menu for Launch Again, the device picker, and a static app-status badge. The badge follows the console for the selected scheme/configuration/destination: green **App Running**, gray **App Exited**, amber **App Starting**, or gray **App Unknown** when disconnected or not tracked. It tracks the attached process, including background execution, and does not query apps launched independently.
+- **Build Output** contains build/deployment logs. **App Console** connects automatically during launch, streams live app output, and remains connected after the run finishes without blocking the build queue. The console uses a native scrollable text view with incremental appends, wrapped lines, and text selection. Scrolling back automatically pauses follow so incoming logs do not pull you to the bottom. Search filters visible lines; Pause Scrolling freezes the view while capture continues; Resume catches up. The menu provides Clear, Copy Visible/All, and Disconnect.
+- Physical-device consoles use `devicectl --console` with `OS_ACTIVITY_DT_MODE=enable`; simulators use `simctl launch --console-pty` with the equivalent child environment. Both run with a real terminal. Framework/SwiftUI messages depend on what the OS forwards; exact parity with Xcode is not guaranteed. This streams the launched app, not the entire device’s unified log, and does not attach a debugger.
+- Console sessions have no lifetime timeout, retain a bounded tail, and are replaced when the same project/app is launched again. Launch must be confirmed within 45 seconds before the run baseline advances. Disconnect, project removal, and app quit stop local forwarders. Disconnect uses a non-catchable signal to avoid deliberately forwarding termination to the app; it is not an app Stop/debugger control. Use Run/Launch Again to reconnect (which relaunches the app).
+- Physical-device installation and launch check `devicectl device info lockState`. A confirmed lock shows **Unlock Device** in the toolbar with a countdown in run progress, waits up to two minutes, and automatically continues after unlock. A lock-related deployment failure also waits and retries within the same bounded window. Stop cancels the wait; timeouts preserve the source baseline. Unknown initial lock status does not block deployment, but a previously confirmed lock requires an explicit unlocked result before continuing. Simulators bypass this check.
+- Paired wireless devices can establish a connection on demand. “Paired · connects on run” is not a reachability guarantee; an offline device fails at installation/launch and leaves changes pending.
+
+## Prerequisites and current scope
+
+Use Xcode’s command-line tools selection (`xcode-select -p`), accept Xcode’s license, and finish its first-launch setup. Configure the target app’s signing in Xcode and perform any initial pairing/trust steps. Physical devices need Developer Mode. XcodeRunner uses existing signing configuration; it does not automatically change profiles or pass `-allowProvisioningUpdates`.
+
+This version supports local iOS/iPadOS app schemes with one runnable app target, plus iOS simulators. Workspaces without a configuration list fall back to Debug/Release. Remote SSH hosts, archives, interactive debugging, custom configurations for those workspaces, and watch/tv/vision targets are future work.
+
+## Lightweight verification
+
+Run `Scripts/check.sh` to typecheck the app source and run a small helper executable covering change snapshots, persistence, device-response parsing, product lookup, recursive folder import, streamed progress parsing, console launch acknowledgement/lifecycle, unlock wait/retry/timeout/cancellation, UTF-8 output, literal process arguments, and cancellation. It does not build the app or invoke a project build/install/launch. SwiftUI compiler macros require the compiler’s normal execution permissions.
+
+Source checks do not establish visual acceptance or successful device deployment. Validate those by running XcodeRunner and deploying a known working app to your paired iPhone.
+
+## Icon assets
+
+The app icon is configured through `Assets.xcassets/AppIcon.appiconset` for Debug and Release. Menu bar artwork uses a native vector version of the code/play emblem with no background tile, with status badges composited into one image. Original artwork and its built-in image-generation prompt are in `DesignAssets`. `Scripts/PreviewMenuBarIcons.swift` renders the offscreen badge contact sheet when compiled alongside `MenuBarIconRenderer.swift`; this does not build the app.
