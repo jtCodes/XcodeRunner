@@ -9,13 +9,15 @@ struct ProjectVersionView: View {
     @State private var refresh = UUID()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-          HStack {
+        VStack(alignment: .trailing, spacing: 4) {
+          HStack(spacing: 8) {
             if loading { ProgressView().controlSize(.small); Text("Reading version…") }
             else if let value {
-                Text("Version \(value.version.isEmpty ? "—" : value.version) · Build \(value.build.isEmpty ? "—" : value.build)")
-                Spacer()
-                Button("Edit Version…") { editing = true }.disabled(!value.editable)
+                Text("v\(value.version.isEmpty ? "—" : value.version) (\(value.build.isEmpty ? "—" : value.build))").monospacedDigit().lineLimit(1)
+                    .help("App version \(value.version), build \(value.build)")
+                Button { editing = true } label: { Image(systemName: "square.and.pencil").frame(width: 20, height: 20) }
+                    .buttonStyle(.plain).accessibilityLabel("Edit Version and Build")
+                    .disabled(!value.editable)
                     .help(value.editable ? "Edit \(value.target) · \(value.configuration)" : value.unavailableReason ?? "Version editing unavailable")
             } else { Text(error ?? "Choose a scheme to read its version.").foregroundStyle(.secondary) }
             Button { refresh = UUID() } label: { Image(systemName: "arrow.clockwise") }
@@ -25,7 +27,7 @@ struct ProjectVersionView: View {
               Text(reason).font(.caption).foregroundStyle(.secondary)
           }
         }
-        .font(.callout)
+        .font(.caption)
         .task(id: "\(project.id)|\(project.scheme)|\(project.configuration)|\(refresh)") {
             value = nil; error = nil
             guard !project.scheme.isEmpty else { return }

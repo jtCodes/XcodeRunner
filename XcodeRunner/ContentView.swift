@@ -46,19 +46,27 @@ struct ContentView: View {
                 Section("Projects · \(store.projects.count)") {
                     ForEach(store.sortedProjects) { project in
                         HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: project.containerPath.hasSuffix(".xcworkspace") ? "square.stack" : "app")
-                                .font(.system(size: 16, weight: .regular))
-                                .foregroundStyle(.secondary).frame(width: 22).padding(.top, 2)
+                            ProjectIconView(project: project)
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(project.name).font(.system(.body, weight: .medium)).lineLimit(1)
                                 Text(sidebarStatus(project)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                             Spacer(minLength: 0)
-                            if store.activeID == project.id { ProgressView().controlSize(.small) }
-                            else if let count = store.changes[project.id]?.count, count > 0 {
-                                Text("\(count)").font(.caption.monospacedDigit()).padding(.horizontal, 7).padding(.vertical, 3)
-                                    .background(.quaternary, in: Capsule())
+                            let count = store.changes[project.id]?.count ?? 0
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.triangle.branch")
+                                Text("\(count)").monospacedDigit()
                             }
+                            .font(.caption)
+                            .frame(width: 48, alignment: .trailing)
+                            .opacity(count > 0 ? 1 : 0)
+                            .accessibilityHidden(count == 0)
+                            .accessibilityLabel("\(count) uncommitted Git files")
+                            .help("\(count) uncommitted Git files")
+                            ProgressView().controlSize(.small)
+                                .frame(width: 16, height: 16)
+                                .opacity(store.activeID == project.id ? 1 : 0)
+                                .accessibilityHidden(store.activeID != project.id)
                         }.padding(.vertical, 4).tag(project.id)
                     }
                 }
@@ -142,12 +150,14 @@ struct ContentView: View {
         GeometryReader { geometry in
          VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    header(project)
-                    settings(project)
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        header(project)
+                        settings(project)
+                    }
                     runBar(project)
-                    if project.baseline != nil { changeList(project) }
-                }.padding(28)
+                    changeList(project)
+                }.padding(20)
             }
             ProjectOutputView(store: store, projectID: project.id,
                 maximumContentHeight: max(120, geometry.size.height - 230))
@@ -158,18 +168,15 @@ struct ContentView: View {
     }
 
     private func header(_ project: TrackedProject) -> some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("LOCAL PROJECT").font(.caption.weight(.semibold)).tracking(1.5).foregroundStyle(.secondary)
-                Text(project.name).font(.system(size: 30, weight: .bold))
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project.containerPath)])
-                } label: {
-                    Label(project.rootPath.replacingOccurrences(of: NSHomeDirectory(), with: "~"), systemImage: "folder")
-                        .font(.caption).lineLimit(1).truncationMode(.middle)
-                }.buttonStyle(.plain).foregroundStyle(.secondary).help("Show in Finder")
-            }
-            Spacer()
+        HStack(spacing: 12) {
+            Text(project.name).font(.headline).lineLimit(1)
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project.containerPath)])
+            } label: {
+                Label(project.rootPath.replacingOccurrences(of: NSHomeDirectory(), with: "~"), systemImage: "folder")
+                    .font(.caption).lineLimit(1).truncationMode(.middle)
+            }.buttonStyle(.plain).foregroundStyle(.secondary).help("Show in Finder: " + project.rootPath)
+            Spacer(minLength: 0)
             Menu {
                 Button("Show in Finder", systemImage: "folder") {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project.containerPath)])
@@ -289,10 +296,9 @@ struct ContentView: View {
     }
 
     private func settings(_ project: TrackedProject) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 20) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("SCHEME").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
                     if store.discovering.contains(project.id) {
                         HStack { ProgressView().controlSize(.small); Text("Discovering schemes…").font(.callout) }
                     } else {
@@ -310,20 +316,17 @@ struct ContentView: View {
                         Button("Use suggested: \(suggested)") { store.update(project.id) { $0.scheme = suggested } }
                             .buttonStyle(.plain).font(.caption).foregroundStyle(.tint)
                     }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("CONFIGURATION").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                }.frame(width: 200, alignment: .leading)
                     Picker("Configuration", selection: binding(project, \.configuration)) {
                         Text("Choose configuration").tag("")
                         if !project.configuration.isEmpty && !project.configurations.contains(project.configuration) {
                             Text("\(project.configuration) · Unavailable").tag(project.configuration)
                         }
                         ForEach(pickerOptions(project.configurations), id: \.self) { Text($0).tag($0) }
-                    }.labelsHidden()
-                }.frame(width: 160)
-            }
-            Divider()
-            ProjectVersionView(project: project)
+                    }.labelsHidden().frame(width: 110)
+                    Spacer(minLength: 0)
+                    ProjectVersionView(project: project)
+            }.controlSize(.small)
             if store.deviceMessage != nil || (store.destinations.isEmpty && !store.loadingDevices) {
                 Divider()
                 VStack(alignment: .leading, spacing: 9) {
@@ -338,8 +341,6 @@ struct ContentView: View {
                 }
             }
         }
-        .padding(20).background(.background, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary))
         .disabled(store.activeID == project.id || store.queue.contains(project.id))
     }
 
@@ -418,32 +419,32 @@ struct ContentView: View {
     private func changeList(_ project: TrackedProject) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Changes since last run").font(.headline)
+                Text("Git changes").font(.headline)
                 Spacer()
                 Button { store.scan(project.id) } label: { Image(systemName: "arrow.clockwise").frame(width: 24, height: 24).contentShape(Rectangle()) }
-                    .buttonStyle(.plain).help("Rescan project files")
+                    .buttonStyle(.plain).help("Refresh Git status")
             }
             if let error = store.scanErrors[project.id] {
                 Label(error, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange)
             } else if let changes = store.changes[project.id] {
                 if changes.isEmpty {
-                    Label("All caught up", systemImage: "checkmark.circle").foregroundStyle(.secondary).padding(.vertical, 8)
+                    Label("Working tree clean", systemImage: "checkmark.circle").foregroundStyle(.secondary).padding(.vertical, 8)
                 } else {
                     DisclosureGroup("\(changes.count) files changed", isExpanded: $showChanges) {
                         VStack(spacing: 0) {
                             ForEach(changes.prefix(100)) { change in
                                 HStack {
-                                    Text(change.path).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                                    Text(change.displayPath).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                                     Spacer()
-                                    Text(change.kind).font(.caption).foregroundStyle(change.kind == "Deleted" ? Color.red : Color.secondary)
+                                    Text(change.detail).font(.caption).foregroundStyle(change.kind == "Deleted" ? Color.red : Color.secondary)
                                 }.padding(.vertical, 5)
                             }
                             if changes.count > 100 { Text("And \(changes.count - 100) more files").font(.caption).foregroundStyle(.secondary) }
                         }.padding(.top, 8).textSelection(.enabled)
                     }
                 }
-            } else { ProgressView("Reading project files…").controlSize(.small) }
-            Text("Watching files. Runs start only when you press Run.")
+            } else { ProgressView("Reading Git status…").controlSize(.small) }
+            Text("Uncommitted Git changes · Staged, unstaged, and untracked · Repository-relative paths")
                 .font(.caption).foregroundStyle(.tertiary)
         }
     }
@@ -463,9 +464,9 @@ struct ContentView: View {
     }
     private func sidebarStatus(_ project: TrackedProject) -> String {
         if let status = store.statuses[project.id] { return status }
-        if store.scanErrors[project.id] != nil { return "Folder unavailable" }
-        if project.baseline == nil { return "First run pending" }
-        return store.changes[project.id]?.isEmpty == true ? "No changes" : "Changes pending"
+        if store.scanErrors[project.id] != nil { return "Git status unavailable" }
+        guard let changes = store.changes[project.id] else { return "Reading Git status…" }
+        return changes.isEmpty ? "Working tree clean" : "Uncommitted changes"
     }
     private func elapsed(_ seconds: TimeInterval) -> String { "\(Int(seconds) / 60):\(String(format: "%02d", Int(seconds) % 60))" }
 }

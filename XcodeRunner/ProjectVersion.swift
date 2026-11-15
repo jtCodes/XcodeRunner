@@ -17,17 +17,10 @@ struct ProjectVersion: Sendable {
     var targetConfigurationIDs: [String] = []
 
     static func load(_ project: TrackedProject) async throws -> Self {
-        let output = try await CommandRunner().run("/usr/bin/xcodebuild",
-            project.containerArguments + ["-scheme", project.scheme, "-configuration", project.configuration,
-                "-showBuildSettings", "-json"], directory: project.rootPath, mergeStandardError: false)
-        let rows: [[String: Any]] = try ToolJSON.decode(output, context: "App version settings") { $0 as? [[String: Any]] }
-        let apps = rows.compactMap { $0["buildSettings"] as? [String: Any] }.filter {
-            $0["PRODUCT_TYPE"] as? String == "com.apple.product-type.application" && $0["WRAPPER_EXTENSION"] as? String == "app"
-        }
-        guard apps.count == 1, let settings = apps.first,
-              let target = settings["TARGET_NAME"] as? String,
+        let settings = try await XcodeTools.appBuildSettings(for: project)
+        guard let target = settings["TARGET_NAME"] as? String,
               let path = settings["PROJECT_FILE_PATH"] as? String else {
-            throw RunnerError.message("Choose a scheme containing exactly one app target to view its version.")
+            throw RunnerError.message("Could not locate the app target's project.")
         }
         return try read(settings: settings, target: target, path: path, configuration: project.configuration)
     }

@@ -43,6 +43,9 @@ final class RunnerStore: ObservableObject {
     private var buildParser: BuildOutputParser?
     @Published var deviceMessage: String?
     private var watchers: [UUID: ProjectWatcher] = [:]
+    private var watcherRoots: [UUID: [String]] = [:]
+    private var gitStates: [UUID: String] = [:]
+    private var foregroundObserver: AnyCancellable?
     private var scanTasks: [UUID: Task<Void, Never>] = [:]
     private var scanAgain: Set<UUID> = []
     private var command: CommandRunner?
@@ -61,15 +64,19 @@ final class RunnerStore: ObservableObject {
         if let selection { UserDefaults.standard.set(selection.uuidString, forKey: Self.lastProjectKey) }
         else { UserDefaults.standard.removeObject(forKey: Self.lastProjectKey) }
         for project in projects { watch(project); scan(project.id) }
+        foregroundObserver = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                for project in self.projects { self.scan(project.id) }
+            }
         Task { await refreshDevices() }
     }
 
     var selected: TrackedProject? { projects.first { $0.id == selection } }
     var sortedProjects: [TrackedProject] {
         projects.sorted {
-            let left = !(changes[$0.id] ?? []).isEmpty
-            let right = !(changes[$1.id] ?? []).isEmpty
-            return left != right ? left : $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            let order = $0.name.localizedStandardCompare($1.name)
+            return order == .orderedSame ? $0.id.uuidString < $1.id.uuidString : order == .orderedAscending
         }
     }
     func save() {
@@ -156,7 +163,7 @@ final class RunnerStore: ObservableObject {
             consoles[id]?.stop(); consoles[id] = nil
             consoleStateObservers[id] = nil; menuAppStates[id] = nil
             if lastFinishedID == id { lastFinishedID = nil }
-            watchers[id] = nil; scanTasks[id]?.cancel(); scanTasks[id] = nil
+            watchers[id] = nil; watcherRoots[id] = nil; gitStates[id] = nil; scanTasks[id]?.cancel(); scanTasks[id] = nil
             scanAgain.remove(id)
             changes[id] = nil; logs[id] = nil; runIDs[id] = nil; scanErrors[id] = nil
             statuses[id] = nil; buildProgress[id] = nil; diagnostics[id] = nil; recommendedSchemes[id] = nil
@@ -165,26 +172,33 @@ final class RunnerStore: ObservableObject {
         if let selection, removable.contains(selection) { self.selection = projects.first?.id }
         save()
     }
-    private func watch(_ project: TrackedProject) {
-        watchers[project.id] = ProjectWatcher(root: project.rootPath) { [weak self] in
-            self?.scan(project.id)
-        }
+    private func watch(_ project: TrackedProject, gitDirectory: String? = nil) {
+        let roots = [project.rootPath] + (gitDirectory.map { [$0] } ?? [])
+        guard watcherRoots[project.id] != roots else { return }
+        watcherRoots[project.id] = roots
+        watchers[project.id] = ProjectWatcher(roots: roots) { [weak self] in self?.scan(project.id) }
     }
     func scan(_ id: UUID) {
         guard let project = projects.first(where: { $0.id == id }) else { return }
-        // No source comparison or file badges exist until a successful run.
-        guard project.baseline != nil else { changes[id] = []; scanErrors[id] = nil; return }
         if scanTasks[id] != nil { scanAgain.insert(id); return }
         scanTasks[id] = Task {
+            defer {
+                scanTasks[id] = nil
+                if scanAgain.remove(id) != nil { scan(id) }
+            }
             do {
-                try await Task.sleep(for: .milliseconds(500))
-                let snapshot = try await Task.detached { try SourceSnapshot.capture(root: project.rootPath) }.value
-                guard !Task.isCancelled, let latest = projects.first(where: { $0.id == id }) else { return }
-                changes[id] = SourceSnapshot.changes(current: snapshot, baseline: latest.baseline)
+                try await Task.sleep(for: .milliseconds(300))
+                let snapshot = try await GitChanges.read(root: project.rootPath)
+                guard !Task.isCancelled, projects.contains(where: { $0.id == id }) else { return }
+                changes[id] = snapshot.changes
+                gitStates[id] = snapshot.fingerprint
                 scanErrors[id] = nil
-            } catch { if !Task.isCancelled { scanErrors[id] = error.localizedDescription } }
-            scanTasks[id] = nil
-            if scanAgain.remove(id) != nil { scan(id) }
+                watch(project, gitDirectory: snapshot.gitDirectory)
+            } catch {
+                guard !Task.isCancelled else { return }
+                changes[id] = nil; gitStates[id] = nil
+                scanErrors[id] = error.localizedDescription
+            }
         }
     }
     func refreshSchemes(_ id: UUID, reportErrors: Bool = true) async {
@@ -244,7 +258,7 @@ final class RunnerStore: ObservableObject {
     }
     func canLaunch(_ project: TrackedProject) -> Bool {
         canRun(project) && project.lastBundleID != nil && project.lastRunSettings == project.settingsKey
-            && project.baseline != nil && changes[project.id]?.isEmpty == true && scanErrors[project.id] == nil
+            && project.lastRunGitState != nil && gitStates[project.id] == project.lastRunGitState && scanErrors[project.id] == nil
     }
     var canRunSelectedProject: Bool { selected.map(canRun) ?? false }
     func runSelectedProject() {
@@ -299,10 +313,10 @@ final class RunnerStore: ObservableObject {
                     throw RunnerError.message("Selected device is unavailable. Refresh destinations and reconnect it.")
                 }
                 var bundleID = project.lastBundleID ?? ""
-                var baseline: [String: String]?
+                var runGitState: String?
                 if !launchOnly {
                     statuses[project.id] = "Reading changes"
-                    baseline = try await Task.detached { try SourceSnapshot.capture(root: project.rootPath) }.value
+                    runGitState = (try? await GitChanges.read(root: project.rootPath))?.fingerprint
                     try checkCancellation()
                     let derived = storage.deletingLastPathComponent().appendingPathComponent("DerivedData/\(project.id.uuidString)")
                     let arguments = project.containerArguments + ["-scheme", project.scheme, "-configuration", project.configuration,
@@ -354,7 +368,7 @@ final class RunnerStore: ObservableObject {
                 try checkCancellation()
                 if !launchOnly {
                     update(project.id) {
-                        $0.baseline = baseline; $0.lastSuccess = Date(); $0.lastBundleID = bundleID
+                        $0.baseline = nil; $0.lastRunGitState = runGitState; $0.lastSuccess = Date(); $0.lastBundleID = bundleID
                         $0.lastDestinationID = destination.id; $0.lastRunSettings = project.settingsKey
                     }
                 }

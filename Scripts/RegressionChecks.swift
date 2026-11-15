@@ -124,6 +124,105 @@ struct RegressionChecks {
         catch { rejectedStaleBuild = true }
         try require(rejectedStaleBuild, "Archive build number is verified too")
         try FileManager.default.removeItem(at: archiveRoot)
+        let iconRoot = root.appendingPathComponent("IconFixtures")
+        let iconSet = iconRoot.appendingPathComponent("Assets.xcassets/Target Icon.appiconset")
+        try FileManager.default.createDirectory(at: iconSet, withIntermediateDirectories: true)
+        let iconManifest: [String: Any] = ["images": [
+            ["filename": "small.png", "idiom": "iphone", "size": "60x60", "scale": "2x"],
+            ["filename": "large.png", "idiom": "universal", "size": "1024x1024"],
+            ["filename": "dark.png", "idiom": "universal", "size": "1024x1024", "appearances": [["appearance": "luminosity", "value": "dark"]]],
+            ["filename": "missing.png", "idiom": "universal", "size": "1024x1024"]
+        ]]
+        try JSONSerialization.data(withJSONObject: iconManifest).write(to: iconSet.appendingPathComponent("Contents.json"))
+        for name in ["small.png", "large.png", "dark.png"] { try Data().write(to: iconSet.appendingPathComponent(name)) }
+        let iconCandidates = ProjectAppIcon.files(root: iconRoot, name: "Target Icon")
+        try require(iconCandidates.map(\.lastPathComponent) == ["large.png", "small.png"], "Sidebar icons prefer large default artwork and skip dark/missing assets")
+        try require(ProjectAppIcon.files(root: iconRoot, name: "Different Target").isEmpty, "Sidebar resolves the configured icon name instead of another target's icon")
+        let duplicateSet = iconRoot.appendingPathComponent("Other/Assets.xcassets/Target Icon.appiconset")
+        try FileManager.default.createDirectory(at: duplicateSet, withIntermediateDirectories: true)
+        try require(ProjectAppIcon.files(root: iconRoot, name: "Target Icon").isEmpty, "Ambiguous icon catalogs fall back rather than show the wrong app")
+        let iconProject = iconRoot.appendingPathComponent("Fixture.xcodeproj")
+        try FileManager.default.createDirectory(at: iconProject, withIntermediateDirectories: true)
+        let iconObjects: [String: Any] = ["objects": [
+            "APP": ["isa": "PBXNativeTarget", "name": "App", "buildPhases": ["RESOURCES"]],
+            "RESOURCES": ["isa": "PBXResourcesBuildPhase", "files": ["BUILD_FILE"]],
+            "BUILD_FILE": ["fileRef": "CATALOG"],
+            "ROOT": ["isa": "PBXGroup", "children": ["SHARED"]],
+            "SHARED": ["isa": "PBXGroup", "path": ".", "children": ["CATALOG"], "sourceTree": "<group>"],
+            "CATALOG": ["isa": "PBXFileReference", "path": "Assets.xcassets", "sourceTree": "<group>"]
+        ]]
+        try PropertyListSerialization.data(fromPropertyList: iconObjects, format: .xml, options: 0).write(to: iconProject.appendingPathComponent("project.pbxproj"))
+        let targetCatalogs = ProjectAppIcon.catalogRoots(project: iconProject, target: "App", sourceRoot: iconRoot)
+        try require(targetCatalogs.count == 1 && targetCatalogs[0].standardizedFileURL.path == iconRoot.appendingPathComponent("Assets.xcassets").standardizedFileURL.path, "Icon catalogs resolve from target resource references through parent groups")
+        try require(ProjectAppIcon.files(roots: targetCatalogs, name: "Target Icon").count == 2, "Dependency demo icons do not make the selected app target ambiguous")
+        try FileManager.default.removeItem(at: iconRoot)
+        let cacheDirectory = root.appendingPathComponent("IconCache")
+        let cacheInput = root.appendingPathComponent("icon-input.png")
+        try Data("old-icon".utf8).write(to: cacheInput)
+        let cacheProject = TrackedProject(containerPath: root.appendingPathComponent("App.xcodeproj").path,
+            rootPath: root.path, schemes: ["App"], scheme: "App", configuration: "Debug")
+        let iconCache = ProjectIconCache(directory: cacheDirectory)
+        let thumbnailBytes = Data("cached-thumbnail".utf8)
+        try iconCache.save(thumbnailBytes, for: cacheProject, inputs: [cacheInput])
+        let relaunchedCache = ProjectIconCache(directory: cacheDirectory)
+        let persistedIcon = relaunchedCache.load(cacheProject)
+        try require(persistedIcon?.data == thumbnailBytes && persistedIcon?.fresh == true, "Disk icon cache survives a new cache instance without metadata rediscovery")
+        try Data("new-icon".utf8).write(to: cacheInput)
+        let staleIcon = relaunchedCache.load(cacheProject)
+        try require(staleIcon?.fresh == false && staleIcon?.data == thumbnailBytes, "Same-size artwork edits invalidate metadata while keeping cached artwork available during refresh")
+        var differentScheme = cacheProject
+        differentScheme.scheme = "Another App"
+        try require(relaunchedCache.load(differentScheme) == nil, "Icon cache does not reuse another scheme's artwork")
+        differentScheme = cacheProject
+        differentScheme.configuration = "Release"
+        try require(relaunchedCache.load(differentScheme) == nil, "Configuration-specific icons have distinct cache keys")
+        try FileManager.default.removeItem(at: cacheInput)
+        try require(relaunchedCache.load(cacheProject)?.fresh == false, "Missing icon sources trigger refresh rather than a false cache hit")
+        try Data("corrupt cache".utf8).write(to: cacheDirectory.appendingPathComponent(ProjectIconCache.key(for: cacheProject) + ".json"))
+        try require(relaunchedCache.load(cacheProject) == nil, "Corrupt icon caches fall back to discovery")
+        try FileManager.default.removeItem(at: cacheDirectory)
+        let gitRoot = root.appendingPathComponent("GitFixture")
+        try FileManager.default.createDirectory(at: gitRoot.appendingPathComponent("Nested"), withIntermediateDirectories: true)
+        let gitRunner = CommandRunner()
+        func git(_ arguments: [String]) async throws {
+            _ = try await gitRunner.run("/usr/bin/git", ["-C", gitRoot.path, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"] + arguments,
+                environment: ["GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"])
+        }
+        try await git(["init", "--quiet"])
+        try await git(["config", "user.name", "Regression Test"])
+        try await git(["config", "user.email", "test@example.invalid"])
+        try await git(["config", "status.renames", "true"])
+        for name in ["tracked.swift", "staged.swift", "deleted.swift", "old name.swift", "dual.swift", "Nested/Inside.swift"] {
+            try Data("first".utf8).write(to: gitRoot.appendingPathComponent(name))
+        }
+        try Data("ignored/\n".utf8).write(to: gitRoot.appendingPathComponent(".gitignore"))
+        try await git(["add", "."])
+        try await git(["commit", "--quiet", "-m", "Fixture"])
+        try Data("other".utf8).write(to: gitRoot.appendingPathComponent("tracked.swift"))
+        try Data("stage".utf8).write(to: gitRoot.appendingPathComponent("staged.swift"))
+        try Data("stage".utf8).write(to: gitRoot.appendingPathComponent("dual.swift"))
+        try await git(["add", "staged.swift", "dual.swift"])
+        try Data("again".utf8).write(to: gitRoot.appendingPathComponent("dual.swift"))
+        try FileManager.default.removeItem(at: gitRoot.appendingPathComponent("deleted.swift"))
+        try await git(["mv", "old name.swift", "renamed -> file.swift"])
+        let unusualPath = "new file\n名前.swift"
+        try Data("new".utf8).write(to: gitRoot.appendingPathComponent(unusualPath))
+        try FileManager.default.createDirectory(at: gitRoot.appendingPathComponent("ignored"), withIntermediateDirectories: true)
+        try Data("noise".utf8).write(to: gitRoot.appendingPathComponent("ignored/generated.swift"))
+        let gitSnapshot = try await GitChanges.read(root: gitRoot.path)
+        let gitFiles = Dictionary(uniqueKeysWithValues: gitSnapshot.changes.map { ($0.path, $0) })
+        try require(gitFiles.count == 6 && gitFiles["ignored/generated.swift"] == nil, "Git counts staged, unstaged, untracked, deleted, and renamed files while respecting gitignore")
+        try require(gitFiles["tracked.swift"]?.gitStatus == " M" && gitFiles["staged.swift"]?.gitStatus == "M " && gitFiles["dual.swift"]?.gitStatus == "MM", "Git preserves index and working-tree status separately")
+        try require(gitFiles["renamed -> file.swift"]?.originalPath == "old name.swift" && gitFiles[unusualPath]?.kind == "Untracked", "NUL-delimited Git parsing preserves rename paths, spaces, newlines, and Unicode")
+        try Data("third".utf8).write(to: gitRoot.appendingPathComponent("tracked.swift"))
+        let newerGitSnapshot = try await GitChanges.read(root: gitRoot.path)
+        try require(gitSnapshot.fingerprint != newerGitSnapshot.fingerprint, "Further edits with unchanged Git status still invalidate Launch Again's last-built-source check")
+        try Data("other".utf8).write(to: gitRoot.appendingPathComponent("Nested/Inside.swift"))
+        let nestedGit = try await GitChanges.read(root: gitRoot.appendingPathComponent("Nested").path)
+        try require(nestedGit.changes.count == 1 && nestedGit.changes.first?.path == "Nested/Inside.swift", "Nested projects scope Git changes to their own folder with repository-relative paths")
+        let conflicts = try GitChanges.parse("UU conflicted.swift\0")
+        try require(conflicts.first?.kind == "Conflict", "Unmerged Git records surface conflicts")
+        try FileManager.default.removeItem(at: gitRoot)
         let source = root.appendingPathComponent("App.swift")
         try Data("first".utf8).write(to: source)
         for directory in [".git", "build", "DerivedData", "xcuserdata"] {

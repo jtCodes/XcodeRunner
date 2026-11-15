@@ -15,6 +15,7 @@ struct TrackedProject: Identifiable, Codable, Sendable {
     var lastBundleID: String?
     var lastDestinationID: String?
     var lastRunSettings: String?
+    var lastRunGitState: String?
     var name: String { URL(fileURLWithPath: containerPath).deletingPathExtension().lastPathComponent }
     var containerArguments: [String] {
         [containerPath.hasSuffix(".xcworkspace") ? "-workspace" : "-project", containerPath]
@@ -45,7 +46,16 @@ struct RunDestination: Identifiable, Hashable, Sendable {
 struct FileChange: Identifiable, Sendable {
     var path: String
     var kind: String
+    var originalPath: String? = nil
+    var gitStatus: String? = nil
     var id: String { path }
+    var displayPath: String { originalPath.map { "\($0) → \(path)" } ?? path }
+    var detail: String {
+        guard let gitStatus, gitStatus != "??" else { return kind }
+        let staged = gitStatus.first != " "
+        let unstaged = gitStatus.last != " "
+        return kind + (staged && unstaged ? " · Staged + unstaged" : staged ? " · Staged" : " · Unstaged")
+    }
 }
 
 enum RunnerError: LocalizedError {
