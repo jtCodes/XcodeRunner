@@ -6,6 +6,7 @@ struct ProjectOutputView: View {
     let projectID: UUID
     @State private var tab = "build"
     @State private var expanded = true
+    @State private var issueFilter: DiagnosticFilter = .all
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,12 +18,17 @@ struct ProjectOutputView: View {
                 Picker("Output", selection: $tab) {
                     Text("Build Output").tag("build")
                     Text("App Console").tag("console")
-                }.pickerStyle(.segmented).labelsHidden().frame(width: 250)
+                    Text("Issues (\(store.diagnostics[projectID]?.count ?? 0))").tag("issues")
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 360)
                 Spacer()
             }.padding(.horizontal, 20).padding(.vertical, 10)
             if expanded {
                 Group {
-                if tab == "console" {
+                if tab == "issues" {
+                    RunIssuesView(issues: store.diagnostics[projectID] ?? [],
+                        rootPath: store.projects.first { $0.id == projectID }?.rootPath ?? "",
+                        filter: $issueFilter)
+                } else if tab == "console" {
                     if let console = store.consoles[projectID] {
                         LiveConsoleView(console: console).id(console.id)
                     } else {
@@ -36,8 +42,14 @@ struct ProjectOutputView: View {
                 .clipped()
             }
         }
+        .onChange(of: store.issueNavigation?.id) { _, _ in
+            guard let request = store.issueNavigation, request.projectID == projectID else { return }
+            issueFilter = request.filter; tab = "issues"; expanded = true
+        }
         .onAppear {
-            if store.consoles[projectID] != nil && store.activeID != projectID { tab = "console" }
+            if store.statuses[projectID] == "Failed", store.diagnostics[projectID]?.isEmpty == false {
+                issueFilter = .errors; tab = "issues"
+            } else if store.consoles[projectID] != nil && store.activeID != projectID { tab = "console" }
         }
         .onChange(of: store.consoles[projectID]?.id) { _, id in
             if id != nil { tab = "console"; expanded = true }

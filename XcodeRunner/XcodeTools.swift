@@ -1,15 +1,11 @@
 import Foundation
 
 enum XcodeTools {
-    static func json(_ text: String) throws -> [String: Any] {
-        // xcodebuild can print package-resolution notices before its JSON document.
-        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}") else {
-            throw RunnerError.message("The Xcode tool did not return JSON.\n\(text.suffix(2000))")
+    static func json(_ text: String, containing key: String? = nil) throws -> [String: Any] {
+        try ToolJSON.decode(text, context: "Xcode tool response") { value in
+            guard let object = value as? [String: Any], key == nil || object[key!] != nil else { return nil }
+            return object
         }
-        guard let value = try JSONSerialization.jsonObject(with: Data(text[start...end].utf8)) as? [String: Any] else {
-            throw RunnerError.message("Unexpected Xcode tool response.")
-        }
-        return value
     }
 
     static let importIgnored = SourceSnapshot.ignored.union(["Pods", "Carthage", "CarthageBuild", "vendor"])
@@ -121,13 +117,22 @@ enum XcodeTools {
         return projects
     }
 
-    static func schemes(for project: TrackedProject) async throws -> (schemes: [String], configurations: [String]) {
-        let text = try await CommandRunner().run("/usr/bin/xcodebuild", project.containerArguments + ["-list", "-json"], directory: project.rootPath)
-        let object = try json(text)
+    static func schemes(for project: TrackedProject) async throws -> (schemes: [String], configurations: [String], recommended: String?) {
+        let text = try await CommandRunner().run("/usr/bin/xcodebuild", project.containerArguments + ["-list", "-json"], directory: project.rootPath, mergeStandardError: false)
+        let object: [String: Any] = try ToolJSON.decode(text, context: "scheme discovery for \(project.name)") { value in
+            guard let object = value as? [String: Any], object["workspace"] != nil || object["project"] != nil else { return nil }
+            return object
+        }
         let details = (object["workspace"] ?? object["project"]) as? [String: Any] ?? [:]
-        let schemes = details["schemes"] as? [String] ?? []
+        let schemes = Array(Set((details["schemes"] as? [String] ?? []).filter { !$0.isEmpty }))
         guard !schemes.isEmpty else { throw RunnerError.message("No schemes found. Share an app scheme in Xcode, then refresh schemes.") }
-        return (schemes.sorted(), details["configurations"] as? [String] ?? ["Debug", "Release"])
+        let recommendation = SchemeRecommendation.choose(schemes: schemes, project: project)
+        let ordered = schemes.sorted {
+            if ($0 == recommendation) != ($1 == recommendation) { return $0 == recommendation }
+            return $0.localizedStandardCompare($1) == .orderedAscending
+        }
+        let configurations = Array(Set((details["configurations"] as? [String] ?? []).filter { !$0.isEmpty })).sorted()
+        return (ordered, configurations.isEmpty ? ["Debug", "Release"] : configurations, recommendation)
     }
 
     static func devices() async throws -> [RunDestination] {
@@ -162,8 +167,8 @@ enum XcodeTools {
     }
 
     static func simulators() async throws -> [RunDestination] {
-        let text = try await CommandRunner().run("/usr/bin/xcrun", ["simctl", "list", "devices", "available", "--json"], timeout: 30)
-        let groups = try json(text)["devices"] as? [String: [[String: Any]]] ?? [:]
+        let text = try await CommandRunner().run("/usr/bin/xcrun", ["simctl", "list", "devices", "available", "--json"], timeout: 30, mergeStandardError: false)
+        let groups = try json(text, containing: "devices")["devices"] as? [String: [[String: Any]]] ?? [:]
         return groups.filter { $0.key.contains("iOS") }.flatMap { runtime, records in
             records.compactMap { record -> RunDestination? in
                 guard let id = record["udid"] as? String, record["isAvailable"] as? Bool == true else { return nil }
@@ -174,9 +179,9 @@ enum XcodeTools {
     }
 
     static func appProduct(settingsText: String) throws -> (path: String, bundleID: String) {
-        guard let start = settingsText.firstIndex(of: "["), let end = settingsText.lastIndex(of: "]"),
-              let rows = try JSONSerialization.jsonObject(with: Data(settingsText[start...end].utf8)) as? [[String: Any]] else {
-            throw RunnerError.message("Cannot read build product settings.")
+        let rows: [[String: Any]] = try ToolJSON.decode(settingsText, context: "xcodebuild app-product settings") { value in
+            guard let rows = value as? [[String: Any]], rows.contains(where: { $0["buildSettings"] is [String: Any] }) else { return nil }
+            return rows
         }
         let apps = rows.compactMap { $0["buildSettings"] as? [String: Any] }.filter {
             ($0["WRAPPER_EXTENSION"] as? String) == "app" && ($0["PRODUCT_TYPE"] as? String) == "com.apple.product-type.application"

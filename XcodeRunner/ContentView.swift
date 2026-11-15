@@ -289,16 +289,29 @@ struct ContentView: View {
                     if store.discovering.contains(project.id) {
                         HStack { ProgressView().controlSize(.small); Text("Discovering schemes…").font(.callout) }
                     } else {
-                        Picker("Scheme", selection: binding(project.id, \.scheme)) {
-                            if project.schemes.isEmpty { Text("Refresh schemes to begin").tag("") }
-                            ForEach(project.schemes, id: \.self) { Text($0).tag($0) }
+                        Picker("Scheme", selection: binding(project, \.scheme)) {
+                            Text("Choose an app scheme").tag("")
+                            if !project.scheme.isEmpty && !project.schemes.contains(project.scheme) {
+                                Text("\(project.scheme) · Unavailable").tag(project.scheme)
+                            }
+                            ForEach(pickerOptions(project.schemes), id: \.self) { name in
+                                Text(name + (store.recommendedSchemes[project.id] == name ? " · Suggested" : "")).tag(name)
+                            }
                         }.labelsHidden()
+                    }
+                    if let suggested = store.recommendedSchemes[project.id], suggested != project.scheme {
+                        Button("Use suggested: \(suggested)") { store.update(project.id) { $0.scheme = suggested } }
+                            .buttonStyle(.plain).font(.caption).foregroundStyle(.tint)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .leading, spacing: 7) {
                     Text("CONFIGURATION").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    Picker("Configuration", selection: binding(project.id, \.configuration)) {
-                        ForEach(project.configurations, id: \.self) { Text($0).tag($0) }
+                    Picker("Configuration", selection: binding(project, \.configuration)) {
+                        Text("Choose configuration").tag("")
+                        if !project.configuration.isEmpty && !project.configurations.contains(project.configuration) {
+                            Text("\(project.configuration) · Unavailable").tag(project.configuration)
+                        }
+                        ForEach(pickerOptions(project.configurations), id: \.self) { Text($0).tag($0) }
                     }.labelsHidden()
                 }.frame(width: 160)
             }
@@ -377,10 +390,14 @@ struct ContentView: View {
             if progress.activities > 0 || progress.warnings > 0 || progress.errors > 0 {
                 HStack(spacing: 16) {
                     Text("\(progress.activities) build activities")
-                    Label("\(progress.warnings) warnings", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(progress.warnings > 0 ? Color.orange : Color.secondary)
-                    Label("\(progress.errors) errors", systemImage: "xmark.octagon")
-                        .foregroundStyle(progress.errors > 0 ? Color.red : Color.secondary)
+                    Button { store.showIssues(project.id, filter: .warnings) } label: {
+                        Label("\(progress.warnings) warnings", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(progress.warnings > 0 ? Color.orange : Color.secondary)
+                    }.buttonStyle(.plain).help("Show build warnings")
+                    Button { store.showIssues(project.id, filter: .errors) } label: {
+                        Label("\(progress.errors) errors", systemImage: "xmark.octagon")
+                            .foregroundStyle(progress.errors > 0 ? Color.red : Color.secondary)
+                    }.buttonStyle(.plain).help("Show run errors")
                 }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
         }
@@ -426,12 +443,18 @@ struct ContentView: View {
         ProjectOutputView(store: store, projectID: project.id)
     }
 
-    private func binding(_ id: UUID, _ keyPath: WritableKeyPath<TrackedProject, String>) -> Binding<String> {
-        Binding(get: { store.projects.first { $0.id == id }?[keyPath: keyPath] ?? "" },
-                set: { value in
-                    guard store.projects.first(where: { $0.id == id })?[keyPath: keyPath] != value else { return }
-                    store.update(id) { $0[keyPath: keyPath] = value }
-                })
+    private func pickerOptions(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    private func binding(_ project: TrackedProject, _ keyPath: WritableKeyPath<TrackedProject, String>) -> Binding<String> {
+        // Selection and tags use the same render snapshot. A live-store getter
+        // could return an empty/new value while old rows are being reconciled.
+        Binding(get: { project[keyPath: keyPath] }, set: { value in
+            guard let current = store.projects.first(where: { $0.id == project.id }), current[keyPath: keyPath] != value else { return }
+            store.update(project.id) { $0[keyPath: keyPath] = value }
+        })
     }
     private func sidebarStatus(_ project: TrackedProject) -> String {
         if let status = store.statuses[project.id] { return status }
