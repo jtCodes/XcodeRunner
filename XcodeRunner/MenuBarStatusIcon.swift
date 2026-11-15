@@ -18,7 +18,7 @@ struct MenuBarStatusIcon: View {
         let last = store.lastFinishedID
         let status = last.flatMap { store.statuses[$0] }
         if status == "Failed" {
-            return ("exclamationmark", .systemRed, "XcodeRunner · Run failed. Open for details.")
+            return ("exclamationmark", .systemRed, "XcodeRunner · Build or run failed. Open for details.")
         }
         let running = store.projects.filter { store.menuAppStates[$0.id] == .running }
         if !running.isEmpty {
@@ -28,8 +28,8 @@ struct MenuBarStatusIcon: View {
             return ("stop.fill", .systemGray, "XcodeRunner · App exited")
         }
         if status == "Cancelled" { return ("stop.fill", .systemGray, "XcodeRunner · Run cancelled") }
-        if status == "Run succeeded" || status == "Launched" {
-            return ("checkmark", .systemGreen, "XcodeRunner · Last run succeeded; no app currently tracked as running")
+        if status == "Run succeeded" || status == "Launched" || status == "Archive succeeded" {
+            return ("checkmark", .systemGreen, "XcodeRunner · Last build operation succeeded; no app currently tracked as running")
         }
         return (nil, .clear, "XcodeRunner · Ready")
     }

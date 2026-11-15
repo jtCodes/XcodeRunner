@@ -20,6 +20,7 @@ final class RunnerStore: ObservableObject {
     @Published var scanErrors: [UUID: String] = [:]
     @Published var statuses: [UUID: String] = [:]
     @Published var logs: [UUID: String] = [:]
+    @Published private(set) var runIDs: [UUID: UUID] = [:]
     @Published var consoles: [UUID: AppConsoleSession] = [:]
     @Published private(set) var menuAppStates: [UUID: AppExecutionState] = [:]
     @Published private(set) var lastFinishedID: UUID?
@@ -157,7 +158,7 @@ final class RunnerStore: ObservableObject {
             if lastFinishedID == id { lastFinishedID = nil }
             watchers[id] = nil; scanTasks[id]?.cancel(); scanTasks[id] = nil
             scanAgain.remove(id)
-            changes[id] = nil; logs[id] = nil; scanErrors[id] = nil
+            changes[id] = nil; logs[id] = nil; runIDs[id] = nil; scanErrors[id] = nil
             statuses[id] = nil; buildProgress[id] = nil; diagnostics[id] = nil; recommendedSchemes[id] = nil
         }
         projects.removeAll { removable.contains($0.id) }
@@ -226,9 +227,29 @@ final class RunnerStore: ObservableObject {
             && project.configurations.contains(project.configuration) && destinations.contains { $0.id == project.destinationID && $0.available }
             && activeID != project.id && !queue.contains(project.id) && !discovering.contains(project.id)
     }
+    func canArchive(_ project: TrackedProject) -> Bool {
+        activeID == nil && queue.isEmpty && !discovering.contains(project.id)
+            && !project.scheme.isEmpty && project.schemes.contains(project.scheme)
+    }
+    func archive(_ project: TrackedProject) {
+        guard canArchive(project) else { return }
+        start(project, launchOnly: false, archiving: true)
+    }
+    func openLastArchive(_ project: TrackedProject) {
+        guard let path = project.lastArchivePath else { return }
+        Task {
+            do { _ = try await CommandRunner().run("/usr/bin/open", ["-a", "Xcode", path]) }
+            catch { message = "Could not open archive in Xcode: \(error.localizedDescription)\n\(path)" }
+        }
+    }
     func canLaunch(_ project: TrackedProject) -> Bool {
         canRun(project) && project.lastBundleID != nil && project.lastRunSettings == project.settingsKey
             && project.baseline != nil && changes[project.id]?.isEmpty == true && scanErrors[project.id] == nil
+    }
+    var canRunSelectedProject: Bool { selected.map(canRun) ?? false }
+    func runSelectedProject() {
+        guard let project = selected, canRun(project) else { return }
+        enqueue(project.id)
     }
     func enqueue(_ id: UUID) {
         guard let project = projects.first(where: { $0.id == id }), canRun(project) else { return }
@@ -260,15 +281,20 @@ final class RunnerStore: ObservableObject {
         logs[id, default: ""] += text
         if logs[id, default: ""].count > 250_000 { logs[id] = String(logs[id, default: ""].suffix(200_000)) }
     }
-    private func start(_ project: TrackedProject, launchOnly: Bool) {
+    private func start(_ project: TrackedProject, launchOnly: Bool, archiving: Bool = false) {
         activeID = project.id; startedAt = Date(); cancelRequested = false
-        buildProgress[project.id] = BuildProgress(launchOnly: launchOnly)
+        runIDs[project.id] = UUID()
+        buildProgress[project.id] = BuildProgress(launchOnly: launchOnly, archiving: archiving)
         diagnostics[project.id] = []
         logs[project.id] = "\(project.name) · \(project.scheme) · \(project.configuration)\n\(Date().formatted())\n\n"
         let runner = CommandRunner(); command = runner
         Task {
             defer { activeID = nil; startedAt = nil; command = nil; buildParser = nil; launchingConsole = nil; waitingForUnlockID = nil; next() }
             do {
+                if archiving {
+                    try await performArchive(project, runner: runner)
+                    return
+                }
                 guard let destination = destinations.first(where: { $0.id == project.destinationID && $0.available }) else {
                     throw RunnerError.message("Selected device is unavailable. Refresh destinations and reconnect it.")
                 }
@@ -346,6 +372,32 @@ final class RunnerStore: ObservableObject {
             }
         }
     }
+    private func performArchive(_ project: TrackedProject, runner: CommandRunner) async throws {
+        let archives = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/Archives", isDirectory: true)
+        let plan = ArchivePlan(project: project, archives: archives)
+        try FileManager.default.createDirectory(at: plan.path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        statuses[project.id] = "Reading archive version"
+        let expected = try await ProjectVersion.load(project)
+        try checkCancellation()
+        try expected.syncForArchive()
+        append(expected.editable ? "Synced version across app target configurations before archiving.\n" : "Version source is read-only; the completed archive will be checked against the displayed version.\n", to: project.id)
+        statuses[project.id] = "Archiving"
+        append("Expected version \(expected.version) (\(expected.build)).\n", to: project.id)
+        append("Archive uses the scheme's Archive configuration and a generic iOS device.\n", to: project.id)
+        buildParser = BuildOutputParser()
+        _ = try await execute(runner, "/usr/bin/xcodebuild", plan.arguments, project: project, timeout: 7200, trackBuild: true)
+        try checkCancellation()
+        try plan.validate(expectedVersion: expected.version, expectedBuild: expected.build)
+        update(project.id) { $0.lastArchivePath = plan.path.path }
+        statuses[project.id] = "Archive succeeded"
+        lastFinishedID = project.id
+        append("\n✓ Archive succeeded: \(plan.path.path)\nOpening in Xcode Organizer…\n", to: project.id)
+        do { _ = try await runner.run("/usr/bin/open", ["-a", "Xcode", plan.path.path]) }
+        catch {
+            append("Archive saved, but Xcode could not open it: \(error.localizedDescription)\nUse Open Last Archive in Xcode to retry.\n", to: project.id)
+            message = "Archive succeeded, but Xcode could not open it.\n\(plan.path.path)"
+        }
+    }
     func showIssues(_ projectID: UUID, filter: DiagnosticFilter = .all) {
         issueNavigation = IssueNavigationRequest(projectID: projectID, filter: filter)
     }
@@ -417,7 +469,10 @@ final class RunnerStore: ObservableObject {
             receiveOutput(output.drain(), projectID: project.id, trackBuild: trackBuild)
             if trackBuild {
                 buildParser?.finish()
-                if let progress = buildParser?.progress { buildProgress[project.id] = progress }
+                if var progress = buildParser?.progress {
+                    progress.archiving = buildProgress[project.id]?.archiving ?? false
+                    buildProgress[project.id] = progress
+                }
                 if let issues = buildParser?.diagnostics { diagnostics[project.id] = issues }
                 buildParser = nil
             }
@@ -429,7 +484,10 @@ final class RunnerStore: ObservableObject {
         append(text, to: projectID)
         if trackBuild {
             buildParser?.consume(text)
-            if let progress = buildParser?.progress { buildProgress[projectID] = progress }
+            if var progress = buildParser?.progress {
+                progress.archiving = buildProgress[projectID]?.archiving ?? false
+                buildProgress[projectID] = progress
+            }
             if let issues = buildParser?.diagnostics, diagnostics[projectID]?.count != issues.count { diagnostics[projectID] = issues }
         } else { buildProgress[projectID]?.lastOutput = Date() }
     }

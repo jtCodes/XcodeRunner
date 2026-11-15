@@ -19,6 +19,7 @@ struct BuildProgress: Sendable {
     var warnings = 0
     var errors = 0
     var launchOnly = false
+    var archiving = false
     var lastOutput = Date()
 }
 

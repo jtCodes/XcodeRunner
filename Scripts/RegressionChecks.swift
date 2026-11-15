@@ -9,6 +9,121 @@ struct RegressionChecks {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("XcodeRunner-check-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        // Version edits must preserve the rest of the project and refuse stale writes.
+        let versionOriginal = try Data(contentsOf: URL(fileURLWithPath: "XcodeRunner.xcodeproj/project.pbxproj"))
+        let versionPlist = try PropertyListSerialization.propertyList(from: versionOriginal, format: nil) as! [String: Any]
+        let versionObjects = versionPlist["objects"] as! [String: [String: Any]]
+        let versionID = versionObjects.first { _, object in
+            let settings = object["buildSettings"] as? [String: Any]
+            return object["name"] as? String == "Debug" && settings?["MARKETING_VERSION"] != nil
+        }!.key
+        let versionFile = root.appendingPathComponent("version.pbxproj")
+        try versionOriginal.write(to: versionFile)
+        let versionModel = ProjectVersion(target: "App", configuration: "Debug", version: "1.0", build: "1",
+            file: versionFile, original: versionOriginal, configurationID: versionID, editable: true)
+        let versionEdited = try versionModel.editedSource(version: "2.3.4", build: "42")
+        let editedPlist = try PropertyListSerialization.propertyList(from: versionEdited, format: nil) as! [String: Any]
+        let editedObjects = editedPlist["objects"] as! [String: [String: Any]]
+        let editedSettings = editedObjects[versionID]!["buildSettings"] as! [String: Any]
+        try require(editedSettings["MARKETING_VERSION"] as? String == "2.3.4" && editedSettings["CURRENT_PROJECT_VERSION"] as? String == "42", "Version and build edit selected configuration")
+        var expectedObjects = versionObjects
+        expectedObjects[versionID] = editedObjects[versionID]
+        try require(NSDictionary(dictionary: expectedObjects).isEqual(to: editedObjects), "Other targets and configurations remain intact")
+        try require(ProjectVersion.bumped("1.2.3", component: 1) == "1.3.0" && ProjectVersion.bumped("42") == "43", "Version bumps reset lower components and increment builds")
+        try require(!ProjectVersion.valid("$(INHERITED)") && !ProjectVersion.valid("1.2; injected"), "Reject expressions and nonnumeric versions")
+        try Data("changed".utf8).write(to: versionFile)
+        do {
+            try versionModel.save(version: "2.3.4", build: "42")
+            throw RunnerError.message("FAIL: stale version editor overwrote project")
+        } catch {
+            let preserved = try String(contentsOf: versionFile, encoding: .utf8)
+            try require(preserved == "changed", "External edits prevent version save")
+        }
+        let versionPackage = root.appendingPathComponent("VersionFixture.xcodeproj")
+        try FileManager.default.createDirectory(at: versionPackage, withIntermediateDirectories: true)
+        let projectFile = versionPackage.appendingPathComponent("project.pbxproj")
+        try versionOriginal.write(to: projectFile)
+        let infoFile = root.appendingPathComponent("VersionInfo.plist")
+        let mixedInfo = try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "$(MARKETING_VERSION)", "CFBundleVersion": "1", "Unrelated": "preserve me"], format: .xml, options: 0)
+        try mixedInfo.write(to: infoFile)
+        var fixtureSettings: [String: Any] = ["PROJECT_DIR": root.path, "INFOPLIST_FILE": "VersionInfo.plist", "MARKETING_VERSION": "1.0.2", "CURRENT_PROJECT_VERSION": "Marketing Version"]
+        let mixedVersion = try ProjectVersion.read(settings: fixtureSettings, target: "XcodeRunner", path: versionPackage.path, configuration: "Debug")
+        try require(mixedVersion.editable && mixedVersion.build == "1" && mixedVersion.projectKeys == ["MARKETING_VERSION"] && mixedVersion.plistKeys == ["CFBundleVersion"], "Mixed plist/build-settings versions remain editable despite unused nonnumeric build setting")
+        try mixedVersion.save(version: "2.0.0", build: "2")
+        let syncedProject = try PropertyListSerialization.propertyList(from: Data(contentsOf: projectFile), format: nil) as! [String: Any]
+        let syncedObjects = syncedProject["objects"] as! [String: [String: Any]]
+        for id in mixedVersion.targetConfigurationIDs {
+            let configSettings = syncedObjects[id]!["buildSettings"] as! [String: Any]
+            try require(configSettings["MARKETING_VERSION"] as? String == "2.0.0", "Version save syncs Debug and Release for archiving")
+        }
+        for (id, object) in versionObjects where !mixedVersion.targetConfigurationIDs.contains(id) {
+            try require(NSDictionary(dictionary: object).isEqual(to: syncedObjects[id]!), "Version sync preserves other targets and project settings")
+        }
+        let savedInfo = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoFile), format: nil) as! [String: String]
+        try require(savedInfo["CFBundleVersion"] == "2" && savedInfo["CFBundleShortVersionString"] == "$(MARKETING_VERSION)" && savedInfo["Unrelated"] == "preserve me", "Mixed save edits only literal build plist key")
+        let hardcoded = try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "1.1", "CFBundleVersion": "1"], format: .binary, options: 0)
+        try hardcoded.write(to: infoFile)
+        let literalVersion = try ProjectVersion.read(settings: fixtureSettings, target: "XcodeRunner", path: versionPackage.path, configuration: "Debug")
+        try require(literalVersion.editable && literalVersion.projectKeys.isEmpty && literalVersion.version == "1.1", "Literal plist versions can be edited")
+        let beforeLiteralSave = try Data(contentsOf: projectFile)
+        try literalVersion.save(version: "1.2", build: "3")
+        let afterLiteralSave = try Data(contentsOf: projectFile)
+        var binaryFormat = PropertyListSerialization.PropertyListFormat.xml
+        let binarySaved = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoFile), format: &binaryFormat) as! [String: String]
+        try require(beforeLiteralSave == afterLiteralSave && binaryFormat == .binary && binarySaved["CFBundleVersion"] == "3", "Plist-only edits preserve project bytes and binary plist format")
+        fixtureSettings["INFOPLIST_FILE"] = "Missing.plist"
+        let unavailable = try ProjectVersion.read(settings: fixtureSettings, target: "XcodeRunner", path: versionPackage.path, configuration: "Debug")
+        try require(!unavailable.editable && unavailable.unavailableReason != nil, "Unsupported sources give an explicit reason")
+        // Reproduce a bump saved only to Debug, followed immediately by Archive.
+        try versionOriginal.write(to: projectFile)
+        try mixedInfo.write(to: infoFile)
+        fixtureSettings["INFOPLIST_FILE"] = "VersionInfo.plist"
+        fixtureSettings["MARKETING_VERSION"] = "1.0.2"
+        let beforeBump = try ProjectVersion.read(settings: fixtureSettings, target: "XcodeRunner", path: versionPackage.path, configuration: "Debug")
+        try beforeBump.editedSource(version: "2.26.2", build: "1").write(to: projectFile)
+        fixtureSettings["MARKETING_VERSION"] = "2.26.2"
+        let pendingArchive = try ProjectVersion.read(settings: fixtureSettings, target: "XcodeRunner", path: versionPackage.path, configuration: "Debug")
+        try pendingArchive.syncForArchive()
+        let preflightPlist = try PropertyListSerialization.propertyList(from: Data(contentsOf: projectFile), format: nil) as! [String: Any]
+        let preflightObjects = preflightPlist["objects"] as! [String: [String: Any]]
+        for id in pendingArchive.targetConfigurationIDs {
+            let configSettings = preflightObjects[id]!["buildSettings"] as! [String: Any]
+            try require(configSettings["MARKETING_VERSION"] as? String == "2.26.2", "Archive preflight syncs a previous Debug-only bump before building Release")
+        }
+        try FileManager.default.removeItem(at: versionPackage)
+        try FileManager.default.removeItem(at: infoFile)
+        try FileManager.default.removeItem(at: versionFile)
+        let archiveRoot = root.appendingPathComponent("Archives")
+        let archiveProject = TrackedProject(containerPath: root.appendingPathComponent("App With Spaces.xcworkspace").path,
+            rootPath: root.path, schemes: ["App iOS"], scheme: "App iOS", configuration: "Debug", destinationID: "simulator-id")
+        let archivePlan = ArchivePlan(project: archiveProject, archives: archiveRoot, date: Date(timeIntervalSince1970: 0))
+        try require(archivePlan.arguments.prefix(4) == ["-workspace", archiveProject.containerPath, "-scheme", "App iOS"], "Archive preserves container and scheme argument boundaries")
+        try require(archivePlan.arguments.contains("generic/platform=iOS") && !archivePlan.arguments.contains("simulator-id") && !archivePlan.arguments.contains("-configuration") && archivePlan.arguments.last == "archive", "Archive uses generic device and scheme Archive configuration independently of run settings")
+        let secondPlan = ArchivePlan(project: archiveProject, archives: archiveRoot, date: Date(timeIntervalSince1970: 0))
+        try require(archivePlan.path != secondPlan.path && archivePlan.path.pathExtension == "xcarchive", "Archive names never overwrite previous archives")
+        try FileManager.default.createDirectory(at: archivePlan.path, withIntermediateDirectories: true)
+        let genericArchiveInfo = try PropertyListSerialization.data(fromPropertyList: ["ArchiveVersion": 2], format: .xml, options: 0)
+        try genericArchiveInfo.write(to: archivePlan.path.appendingPathComponent("Info.plist"))
+        var rejectedGenericArchive = false
+        do { try archivePlan.validate() } catch { rejectedGenericArchive = true }
+        try require(rejectedGenericArchive, "Generic archives are not presented as distributable app archives")
+        let appArchiveInfo = try PropertyListSerialization.data(fromPropertyList: ["ApplicationProperties": ["ApplicationPath": "Applications/Test App.app"]], format: .xml, options: 0)
+        try appArchiveInfo.write(to: archivePlan.path.appendingPathComponent("Info.plist"))
+        try FileManager.default.createDirectory(at: archivePlan.path.appendingPathComponent("Products/Applications/Test App.app"), withIntermediateDirectories: true)
+        try archivePlan.validate()
+        let archivedAppInfo = archivePlan.path.appendingPathComponent("Products/Applications/Test App.app/Info.plist")
+        let staleArchiveInfo = try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "2.26.1", "CFBundleVersion": "1"], format: .binary, options: 0)
+        try staleArchiveInfo.write(to: archivedAppInfo)
+        var rejectedStaleVersion = false
+        do { try archivePlan.validate(expectedVersion: "2.26.2", expectedBuild: "1") }
+        catch { rejectedStaleVersion = error.localizedDescription.contains("Archive version mismatch") }
+        try require(rejectedStaleVersion, "Previous-version archives are detected before Organizer opens")
+        try archivePlan.validate(expectedVersion: "2.26.1", expectedBuild: "1")
+        var rejectedStaleBuild = false
+        do { try archivePlan.validate(expectedVersion: "2.26.1", expectedBuild: "2") }
+        catch { rejectedStaleBuild = true }
+        try require(rejectedStaleBuild, "Archive build number is verified too")
+        try FileManager.default.removeItem(at: archiveRoot)
         let source = root.appendingPathComponent("App.swift")
         try Data("first".utf8).write(to: source)
         for directory in [".git", "build", "DerivedData", "xcuserdata"] {

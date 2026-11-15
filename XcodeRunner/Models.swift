@@ -11,6 +11,7 @@ struct TrackedProject: Identifiable, Codable, Sendable {
     var destinationID = ""
     var lastSuccess: Date?
     var baseline: [String: String]?
+    var lastArchivePath: String?
     var lastBundleID: String?
     var lastDestinationID: String?
     var lastRunSettings: String?

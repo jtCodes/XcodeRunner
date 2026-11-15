@@ -139,7 +139,8 @@ struct ContentView: View {
     }
 
     private func dashboard(_ project: TrackedProject) -> some View {
-        VStack(spacing: 0) {
+        GeometryReader { geometry in
+         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     header(project)
@@ -148,8 +149,9 @@ struct ContentView: View {
                     if project.baseline != nil { changeList(project) }
                 }.padding(28)
             }
-            Divider()
-            outputPanel(project)
+            ProjectOutputView(store: store, projectID: project.id,
+                maximumContentHeight: max(120, geometry.size.height - 230))
+         }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .id(project.id)
@@ -187,17 +189,22 @@ struct ContentView: View {
         HStack(spacing: 8) {
             if store.activeID == project.id {
                 Button("Stop", systemImage: "stop.fill") { store.stop() }
-                    .help("Cancel the current build or launch")
+                    .help("Cancel the current build, archive, or launch")
             } else if store.queue.contains(project.id) {
                 Button("Unqueue", systemImage: "xmark") { store.unqueue(project.id) }
             } else {
                 Button(store.activeID == nil ? "Run" : "Queue Run", systemImage: "play.fill") {
                     store.enqueue(project.id)
                 }
-                .keyboardShortcut("r", modifiers: .command)
                 .disabled(!store.canRun(project))
                 .help("Build, install, and launch the selected scheme")
                 Menu {
+                    Button("Archive → Open in Xcode Organizer", systemImage: "archivebox") { store.archive(project) }
+                        .disabled(!store.canArchive(project))
+                    if project.lastArchivePath != nil {
+                        Button("Open Last Archive in Xcode", systemImage: "arrow.up.forward.app") { store.openLastArchive(project) }
+                    }
+                    Divider()
                     Button("Launch Again", systemImage: "arrow.clockwise") { store.launchAgain(project) }
                         .disabled(store.activeID != nil || !store.canLaunch(project))
                 } label: { Image(systemName: "chevron.down").frame(width: 16, height: 22).contentShape(Rectangle()) }
@@ -315,6 +322,8 @@ struct ContentView: View {
                     }.labelsHidden()
                 }.frame(width: 160)
             }
+            Divider()
+            ProjectVersionView(project: project)
             if store.deviceMessage != nil || (store.destinations.isEmpty && !store.loadingDevices) {
                 Divider()
                 VStack(alignment: .leading, spacing: 9) {
@@ -362,8 +371,8 @@ struct ContentView: View {
 
     private func progressPanel(_ project: TrackedProject, progress: BuildProgress) -> some View {
         let active = store.activeID == project.id
-        let succeeded = ["Run succeeded", "Launched"].contains(store.statuses[project.id] ?? "")
-        let phases: [RunPhase] = progress.launchOnly ? [.launching] : RunPhase.allCases
+        let succeeded = ["Run succeeded", "Launched", "Archive succeeded"].contains(store.statuses[project.id] ?? "")
+        let phases: [RunPhase] = progress.archiving ? [.building] : progress.launchOnly ? [.launching] : RunPhase.allCases
         return VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 14) {
                 ForEach(phases, id: \.rawValue) { phase in
@@ -371,7 +380,7 @@ struct ContentView: View {
                     let current = phase == progress.phase
                     HStack(spacing: 6) {
                         Image(systemName: done ? "checkmark.circle.fill" : current && !active ? "exclamationmark.circle" : "circle")
-                        Text(phase.label).font(.caption.weight(current ? .semibold : .regular))
+                        Text(progress.archiving ? "Archive" : phase.label).font(.caption.weight(current ? .semibold : .regular))
                     }
                     .foregroundStyle(done ? Color.green : current ? Color.accentColor : Color.secondary)
                     if phase != phases.last { Rectangle().fill(.quaternary).frame(height: 1) }
@@ -437,10 +446,6 @@ struct ContentView: View {
             Text("Watching files. Runs start only when you press Run.")
                 .font(.caption).foregroundStyle(.tertiary)
         }
-    }
-
-    private func outputPanel(_ project: TrackedProject) -> some View {
-        ProjectOutputView(store: store, projectID: project.id)
     }
 
     private func pickerOptions(_ values: [String]) -> [String] {
