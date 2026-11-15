@@ -29,7 +29,7 @@ final class CommandRunner: @unchecked Sendable {
 
     func run(_ executable: String, _ arguments: [String], directory: String? = nil,
              timeout: TimeInterval? = 120, environment overrides: [String: String] = [:],
-             usePTY: Bool = false, captureLimit: Int = 16_000_000,
+             usePTY: Bool = false, captureLimit: Int = 16_000_000, mergeStandardError: Bool = true,
              output: @escaping @Sendable (String) -> Void = { _ in }) async throws -> String {
         try await Task.detached { [self] in
             let child = Process()
@@ -42,6 +42,9 @@ final class CommandRunner: @unchecked Sendable {
             environment.merge(overrides) { _, new in new }
             child.environment = environment
             let pipe = Pipe()
+            let errorPipe = Pipe()
+            let stderr = CommandStderrCapture()
+            let stderrDrain = DispatchGroup()
             var terminalReader: FileHandle?
             var terminalWriter: FileHandle?
             if usePTY {
@@ -55,7 +58,7 @@ final class CommandRunner: @unchecked Sendable {
                 child.standardInput = terminalWriter
             } else {
                 child.standardOutput = pipe
-                child.standardError = pipe
+                child.standardError = mergeStandardError ? pipe : errorPipe
                 child.standardInput = FileHandle.nullDevice
             }
             let reader = terminalReader ?? pipe.fileHandleForReading
@@ -67,6 +70,19 @@ final class CommandRunner: @unchecked Sendable {
                 if cancelled { throw CancellationError() }
                 try child.run()
                 process = child
+            }
+            if !usePTY && !mergeStandardError {
+                stderrDrain.enter()
+                DispatchQueue.global().async {
+                    defer { stderrDrain.leave() }
+                    var bytes = [UInt8](repeating: 0, count: 16 * 1024)
+                    while true {
+                        let count = Darwin.read(errorPipe.fileHandleForReading.fileDescriptor, &bytes, bytes.count)
+                        if count < 0 && errno == EINTR { continue }
+                        guard count > 0 else { break }
+                        stderr.append(Data(bytes.prefix(count)))
+                    }
+                }
             }
             // Only the child retains the slave FD; closing ours permits EOF/EIO.
             try? terminalWriter?.close()
@@ -101,12 +117,15 @@ final class CommandRunner: @unchecked Sendable {
             if !tail.isEmpty { output(tail) }
             if readError != nil { Self.stop(child) }
             child.waitUntilExit()
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                stderrDrain.notify(queue: .global()) { continuation.resume() }
+            }
             let wasCancelled = lock.withLock { process = nil; return cancelled }
             if wasCancelled { throw CancellationError() }
             if let readError { throw POSIXError(POSIXErrorCode(rawValue: readError) ?? .EIO) }
             let result = String(decoding: captured, as: UTF8.self)
             guard child.terminationStatus == 0 else {
-                throw RunnerError.message("\(URL(fileURLWithPath: executable).lastPathComponent) exited with status \(child.terminationStatus).\n\(result.suffix(4000))")
+                throw RunnerError.message("\(URL(fileURLWithPath: executable).lastPathComponent) exited with status \(child.terminationStatus).\n\((result + stderr.text).suffix(4000))")
             }
             return result
         }.value
@@ -144,4 +163,16 @@ final class CommandOutputBuffer: @unchecked Sendable {
         }
     }
     func drain() -> String { lock.withLock { let result = text; text = ""; return result } }
+}
+
+private final class CommandStderrCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+    func append(_ chunk: Data) {
+        lock.withLock {
+            data.append(chunk)
+            if data.count > 4000 { data.removeFirst(data.count - 4000) }
+        }
+    }
+    var text: String { lock.withLock { String(decoding: data, as: UTF8.self) } }
 }

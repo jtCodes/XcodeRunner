@@ -19,16 +19,16 @@ struct MenuBarRunnerView: View {
                     .disabled(store.importing)
             } else {
                 Picker("Project", selection: $store.selection) {
-                    if store.selection == nil { Text("Choose a project").tag(nil as UUID?) }
+                    Text("Choose a project").tag(nil as UUID?)
                     ForEach(store.sortedProjects) { project in Text(project.name).tag(Optional(project.id)) }
                 }
                 if let project = store.selected {
                     Text(project.scheme.isEmpty ? "Choose a scheme in the main window" : "\(project.scheme) · \(project.configuration)")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Picker("Destination", selection: Binding(get: {
-                        store.projects.first { $0.id == project.id }?.destinationID ?? ""
+                        project.destinationID
                     }, set: { id in
-                        guard id != project.destinationID else { return }
+                        guard let current = store.projects.first(where: { $0.id == project.id }), id != current.destinationID else { return }
                         store.update(project.id) { $0.destinationID = id }
                     })) {
                         Text("Choose a destination").tag("")

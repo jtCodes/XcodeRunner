@@ -5,12 +5,24 @@ import Combine
 @MainActor
 final class RunnerStore: ObservableObject {
     @Published var projects: [TrackedProject] = []
-    @Published var selection: UUID?
+    private static let lastProjectKey = "XcodeRunner.lastSelectedProjectID"
+    @Published var selection: UUID? {
+        didSet {
+            if let selection, projects.contains(where: { $0.id == selection }) {
+                UserDefaults.standard.set(selection.uuidString, forKey: Self.lastProjectKey)
+            } else if projects.isEmpty {
+                UserDefaults.standard.removeObject(forKey: Self.lastProjectKey)
+            }
+        }
+    }
     @Published var destinations: [RunDestination] = []
     @Published var changes: [UUID: [FileChange]] = [:]
+    @Published private(set) var gitRevisions: [UUID: UUID] = [:]
+    @Published private(set) var gitBranches: [UUID: String] = [:]
     @Published var scanErrors: [UUID: String] = [:]
     @Published var statuses: [UUID: String] = [:]
     @Published var logs: [UUID: String] = [:]
+    @Published private(set) var runIDs: [UUID: UUID] = [:]
     @Published var consoles: [UUID: AppConsoleSession] = [:]
     @Published private(set) var menuAppStates: [UUID: AppExecutionState] = [:]
     @Published private(set) var lastFinishedID: UUID?
@@ -22,14 +34,20 @@ final class RunnerStore: ObservableObject {
     @Published var queue: [UUID] = []
     @Published var loadingDevices = false
     @Published var discovering: Set<UUID> = []
+    @Published var recommendedSchemes: [UUID: String] = [:]
     @Published var message: String?
     @Published var importing = false
     @Published var pendingImport: ProjectImportReview?
     @Published var importStatus: String?
     @Published var buildProgress: [UUID: BuildProgress] = [:]
+    @Published var diagnostics: [UUID: [BuildDiagnostic]] = [:]
+    @Published var issueNavigation: IssueNavigationRequest?
     private var buildParser: BuildOutputParser?
     @Published var deviceMessage: String?
     private var watchers: [UUID: ProjectWatcher] = [:]
+    private var watcherRoots: [UUID: [String]] = [:]
+    private var gitStates: [UUID: String] = [:]
+    private var foregroundObserver: AnyCancellable?
     private var scanTasks: [UUID: Task<Void, Never>] = [:]
     private var scanAgain: Set<UUID> = []
     private var command: CommandRunner?
@@ -43,17 +61,24 @@ final class RunnerStore: ObservableObject {
             do { projects = try JSONDecoder().decode([TrackedProject].self, from: Data(contentsOf: storage)) }
             catch { message = "Could not read saved projects: \(error.localizedDescription)" }
         }
-        selection = projects.first?.id
+        let savedID = UserDefaults.standard.string(forKey: Self.lastProjectKey).flatMap(UUID.init(uuidString:))
+        selection = projects.first(where: { $0.id == savedID })?.id ?? projects.first?.id
+        if let selection { UserDefaults.standard.set(selection.uuidString, forKey: Self.lastProjectKey) }
+        else { UserDefaults.standard.removeObject(forKey: Self.lastProjectKey) }
         for project in projects { watch(project); scan(project.id) }
+        foregroundObserver = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                for project in self.projects { self.scan(project.id) }
+            }
         Task { await refreshDevices() }
     }
 
     var selected: TrackedProject? { projects.first { $0.id == selection } }
     var sortedProjects: [TrackedProject] {
         projects.sorted {
-            let left = !(changes[$0.id] ?? []).isEmpty
-            let right = !(changes[$1.id] ?? []).isEmpty
-            return left != right ? left : $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            let order = $0.name.localizedStandardCompare($1.name)
+            return order == .orderedSame ? $0.id.uuidString < $1.id.uuidString : order == .orderedAscending
         }
     }
     func save() {
@@ -140,35 +165,46 @@ final class RunnerStore: ObservableObject {
             consoles[id]?.stop(); consoles[id] = nil
             consoleStateObservers[id] = nil; menuAppStates[id] = nil
             if lastFinishedID == id { lastFinishedID = nil }
-            watchers[id] = nil; scanTasks[id]?.cancel(); scanTasks[id] = nil
+            watchers[id] = nil; watcherRoots[id] = nil; gitStates[id] = nil; scanTasks[id]?.cancel(); scanTasks[id] = nil
             scanAgain.remove(id)
-            changes[id] = nil; logs[id] = nil; scanErrors[id] = nil
-            statuses[id] = nil; buildProgress[id] = nil
+            changes[id] = nil; gitRevisions[id] = nil; gitBranches[id] = nil; logs[id] = nil; runIDs[id] = nil; scanErrors[id] = nil
+            statuses[id] = nil; buildProgress[id] = nil; diagnostics[id] = nil; recommendedSchemes[id] = nil
         }
         projects.removeAll { removable.contains($0.id) }
         if let selection, removable.contains(selection) { self.selection = projects.first?.id }
         save()
     }
-    private func watch(_ project: TrackedProject) {
-        watchers[project.id] = ProjectWatcher(root: project.rootPath) { [weak self] in
-            self?.scan(project.id)
-        }
+    private func watch(_ project: TrackedProject, gitDirectory: String? = nil) {
+        let roots = [project.rootPath] + (gitDirectory.map { [$0] } ?? [])
+        guard watcherRoots[project.id] != roots else { return }
+        watcherRoots[project.id] = roots
+        watchers[project.id] = ProjectWatcher(roots: roots) { [weak self] in self?.scan(project.id) }
     }
     func scan(_ id: UUID) {
         guard let project = projects.first(where: { $0.id == id }) else { return }
-        // No source comparison or file badges exist until a successful run.
-        guard project.baseline != nil else { changes[id] = []; scanErrors[id] = nil; return }
         if scanTasks[id] != nil { scanAgain.insert(id); return }
         scanTasks[id] = Task {
+            defer {
+                scanTasks[id] = nil
+                if scanAgain.remove(id) != nil { scan(id) }
+            }
             do {
-                try await Task.sleep(for: .milliseconds(500))
-                let snapshot = try await Task.detached { try SourceSnapshot.capture(root: project.rootPath) }.value
-                guard !Task.isCancelled, let latest = projects.first(where: { $0.id == id }) else { return }
-                changes[id] = SourceSnapshot.changes(current: snapshot, baseline: latest.baseline)
+                try await Task.sleep(for: .milliseconds(300))
+                let snapshot = try await GitChanges.read(root: project.rootPath)
+                guard !Task.isCancelled, projects.contains(where: { $0.id == id }) else { return }
+                if changes[id] != snapshot.changes || gitStates[id] != snapshot.fingerprint {
+                    gitRevisions[id] = UUID()
+                }
+                changes[id] = snapshot.changes
+                gitBranches[id] = snapshot.branch
+                gitStates[id] = snapshot.fingerprint
                 scanErrors[id] = nil
-            } catch { if !Task.isCancelled { scanErrors[id] = error.localizedDescription } }
-            scanTasks[id] = nil
-            if scanAgain.remove(id) != nil { scan(id) }
+                watch(project, gitDirectory: snapshot.gitDirectory)
+            } catch {
+                guard !Task.isCancelled else { return }
+                changes[id] = nil; gitStates[id] = nil; gitBranches[id] = nil
+                scanErrors[id] = error.localizedDescription
+            }
         }
     }
     func refreshSchemes(_ id: UUID, reportErrors: Bool = true) async {
@@ -178,10 +214,11 @@ final class RunnerStore: ObservableObject {
         do {
             let result = try await XcodeTools.schemes(for: project)
             guard projects.contains(where: { $0.id == id }) else { return }
+            recommendedSchemes[id] = result.recommended
             if statuses[id] == "Scheme discovery failed" { statuses[id] = nil }
             update(id) {
                 $0.schemes = result.schemes; $0.configurations = result.configurations
-                if !result.schemes.contains($0.scheme) { $0.scheme = result.schemes.first ?? "" }
+                if !result.schemes.contains($0.scheme) { $0.scheme = result.recommended ?? "" }
                 if !result.configurations.contains($0.configuration) { $0.configuration = result.configurations.first ?? "Debug" }
             }
         } catch {
@@ -206,12 +243,33 @@ final class RunnerStore: ObservableObject {
         if !errors.isEmpty { deviceMessage = errors.joined(separator: "\n") }
     }
     func canRun(_ project: TrackedProject) -> Bool {
-        !project.scheme.isEmpty && destinations.contains { $0.id == project.destinationID && $0.available }
+        !project.scheme.isEmpty && project.schemes.contains(project.scheme)
+            && project.configurations.contains(project.configuration) && destinations.contains { $0.id == project.destinationID && $0.available }
             && activeID != project.id && !queue.contains(project.id) && !discovering.contains(project.id)
+    }
+    func canArchive(_ project: TrackedProject) -> Bool {
+        activeID == nil && queue.isEmpty && !discovering.contains(project.id)
+            && !project.scheme.isEmpty && project.schemes.contains(project.scheme)
+    }
+    func archive(_ project: TrackedProject) {
+        guard canArchive(project) else { return }
+        start(project, launchOnly: false, archiving: true)
+    }
+    func openLastArchive(_ project: TrackedProject) {
+        guard let path = project.lastArchivePath else { return }
+        Task {
+            do { _ = try await CommandRunner().run("/usr/bin/open", ["-a", "Xcode", path]) }
+            catch { message = "Could not open archive in Xcode: \(error.localizedDescription)\n\(path)" }
+        }
     }
     func canLaunch(_ project: TrackedProject) -> Bool {
         canRun(project) && project.lastBundleID != nil && project.lastRunSettings == project.settingsKey
-            && project.baseline != nil && changes[project.id]?.isEmpty == true && scanErrors[project.id] == nil
+            && project.lastRunGitState != nil && gitStates[project.id] == project.lastRunGitState && scanErrors[project.id] == nil
+    }
+    var canRunSelectedProject: Bool { selected.map(canRun) ?? false }
+    func runSelectedProject() {
+        guard let project = selected, canRun(project) else { return }
+        enqueue(project.id)
     }
     func enqueue(_ id: UUID) {
         guard let project = projects.first(where: { $0.id == id }), canRun(project) else { return }
@@ -243,22 +301,28 @@ final class RunnerStore: ObservableObject {
         logs[id, default: ""] += text
         if logs[id, default: ""].count > 250_000 { logs[id] = String(logs[id, default: ""].suffix(200_000)) }
     }
-    private func start(_ project: TrackedProject, launchOnly: Bool) {
+    private func start(_ project: TrackedProject, launchOnly: Bool, archiving: Bool = false) {
         activeID = project.id; startedAt = Date(); cancelRequested = false
-        buildProgress[project.id] = BuildProgress(launchOnly: launchOnly)
+        runIDs[project.id] = UUID()
+        buildProgress[project.id] = BuildProgress(launchOnly: launchOnly, archiving: archiving)
+        diagnostics[project.id] = []
         logs[project.id] = "\(project.name) · \(project.scheme) · \(project.configuration)\n\(Date().formatted())\n\n"
         let runner = CommandRunner(); command = runner
         Task {
             defer { activeID = nil; startedAt = nil; command = nil; buildParser = nil; launchingConsole = nil; waitingForUnlockID = nil; next() }
             do {
+                if archiving {
+                    try await performArchive(project, runner: runner)
+                    return
+                }
                 guard let destination = destinations.first(where: { $0.id == project.destinationID && $0.available }) else {
                     throw RunnerError.message("Selected device is unavailable. Refresh destinations and reconnect it.")
                 }
                 var bundleID = project.lastBundleID ?? ""
-                var baseline: [String: String]?
+                var runGitState: String?
                 if !launchOnly {
                     statuses[project.id] = "Reading changes"
-                    baseline = try await Task.detached { try SourceSnapshot.capture(root: project.rootPath) }.value
+                    runGitState = (try? await GitChanges.read(root: project.rootPath))?.fingerprint
                     try checkCancellation()
                     let derived = storage.deletingLastPathComponent().appendingPathComponent("DerivedData/\(project.id.uuidString)")
                     let arguments = project.containerArguments + ["-scheme", project.scheme, "-configuration", project.configuration,
@@ -271,7 +335,7 @@ final class RunnerStore: ObservableObject {
                     try checkCancellation()
                     statuses[project.id] = "Locating app"
                     buildProgress[project.id]?.activity = "Locating the built application"
-                    let settings = try await runner.run("/usr/bin/xcodebuild", arguments + ["-showBuildSettings", "-json"], directory: project.rootPath)
+                    let settings = try await runner.run("/usr/bin/xcodebuild", arguments + ["-showBuildSettings", "-json"], directory: project.rootPath, mergeStandardError: false)
                     let product = try XcodeTools.appProduct(settingsText: settings)
                     bundleID = product.bundleID
                     guard FileManager.default.fileExists(atPath: product.path) else { throw RunnerError.message("Built app was not found: \(product.path)") }
@@ -310,7 +374,7 @@ final class RunnerStore: ObservableObject {
                 try checkCancellation()
                 if !launchOnly {
                     update(project.id) {
-                        $0.baseline = baseline; $0.lastSuccess = Date(); $0.lastBundleID = bundleID
+                        $0.baseline = nil; $0.lastRunGitState = runGitState; $0.lastSuccess = Date(); $0.lastBundleID = bundleID
                         $0.lastDestinationID = destination.id; $0.lastRunSettings = project.settingsKey
                     }
                 }
@@ -322,10 +386,50 @@ final class RunnerStore: ObservableObject {
                 launchingConsole?.stop()
                 let cancelled = cancelRequested || error is CancellationError
                 statuses[project.id] = cancelled ? "Cancelled" : "Failed"
+                if !cancelled { recordRunFailure(error, projectID: project.id) }
                 lastFinishedID = project.id
                 append("\n\(cancelled ? "Cancelled. Changes remain pending." : error.localizedDescription)\n", to: project.id)
             }
         }
+    }
+    private func performArchive(_ project: TrackedProject, runner: CommandRunner) async throws {
+        let archives = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Developer/Xcode/Archives", isDirectory: true)
+        let plan = ArchivePlan(project: project, archives: archives)
+        try FileManager.default.createDirectory(at: plan.path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        statuses[project.id] = "Reading archive version"
+        let expected = try await ProjectVersion.load(project)
+        try checkCancellation()
+        try expected.syncForArchive()
+        append(expected.editable ? "Synced version across app target configurations before archiving.\n" : "Version source is read-only; the completed archive will be checked against the displayed version.\n", to: project.id)
+        statuses[project.id] = "Archiving"
+        append("Expected version \(expected.version) (\(expected.build)).\n", to: project.id)
+        append("Archive uses the scheme's Archive configuration and a generic iOS device.\n", to: project.id)
+        buildParser = BuildOutputParser()
+        _ = try await execute(runner, "/usr/bin/xcodebuild", plan.arguments, project: project, timeout: 7200, trackBuild: true)
+        try checkCancellation()
+        try plan.validate(expectedVersion: expected.version, expectedBuild: expected.build)
+        update(project.id) { $0.lastArchivePath = plan.path.path }
+        statuses[project.id] = "Archive succeeded"
+        lastFinishedID = project.id
+        append("\n✓ Archive succeeded: \(plan.path.path)\nOpening in Xcode Organizer…\n", to: project.id)
+        do { _ = try await runner.run("/usr/bin/open", ["-a", "Xcode", plan.path.path]) }
+        catch {
+            append("Archive saved, but Xcode could not open it: \(error.localizedDescription)\nUse Open Last Archive in Xcode to retry.\n", to: project.id)
+            message = "Archive succeeded, but Xcode could not open it.\n\(plan.path.path)"
+        }
+    }
+    func showIssues(_ projectID: UUID, filter: DiagnosticFilter = .all) {
+        issueNavigation = IssueNavigationRequest(projectID: projectID, filter: filter)
+    }
+    private func recordRunFailure(_ error: Error, projectID: UUID) {
+        var issues = diagnostics[projectID] ?? []
+        let extracted = error.localizedDescription.components(separatedBy: .newlines).compactMap(BuildDiagnostic.parse)
+        for issue in extracted where !issues.contains(where: { $0.id == issue.id }) { issues.append(issue) }
+        if !issues.contains(where: { $0.severity == .error }) {
+            issues.append(BuildDiagnostic(severity: .error, message: String(error.localizedDescription.prefix(4000))))
+        }
+        diagnostics[projectID] = issues
+        showIssues(projectID, filter: .errors)
     }
     private func observeConsoleState(_ console: AppConsoleSession, projectID: UUID) {
         menuAppStates[projectID] = console.appState
@@ -385,7 +489,11 @@ final class RunnerStore: ObservableObject {
             receiveOutput(output.drain(), projectID: project.id, trackBuild: trackBuild)
             if trackBuild {
                 buildParser?.finish()
-                if let progress = buildParser?.progress { buildProgress[project.id] = progress }
+                if var progress = buildParser?.progress {
+                    progress.archiving = buildProgress[project.id]?.archiving ?? false
+                    buildProgress[project.id] = progress
+                }
+                if let issues = buildParser?.diagnostics { diagnostics[project.id] = issues }
                 buildParser = nil
             }
         }
@@ -396,15 +504,19 @@ final class RunnerStore: ObservableObject {
         append(text, to: projectID)
         if trackBuild {
             buildParser?.consume(text)
-            if let progress = buildParser?.progress { buildProgress[projectID] = progress }
+            if var progress = buildParser?.progress {
+                progress.archiving = buildProgress[projectID]?.archiving ?? false
+                buildProgress[projectID] = progress
+            }
+            if let issues = buildParser?.diagnostics, diagnostics[projectID]?.count != issues.count { diagnostics[projectID] = issues }
         } else { buildProgress[projectID]?.lastOutput = Date() }
     }
     private func boot(_ destination: RunDestination, runner: CommandRunner, project: TrackedProject) async throws {
         statuses[project.id] = "Starting simulator"
         setPhase(buildProgress[project.id]?.launchOnly == true ? .launching : .installing,
                  activity: "Starting \(destination.name)", id: project.id)
-        let response = try await runner.run("/usr/bin/xcrun", ["simctl", "list", "devices", "--json"])
-        let groups = try XcodeTools.json(response)["devices"] as? [String: [[String: Any]]] ?? [:]
+        let response = try await runner.run("/usr/bin/xcrun", ["simctl", "list", "devices", "--json"], mergeStandardError: false)
+        let groups = try XcodeTools.json(response, containing: "devices")["devices"] as? [String: [[String: Any]]] ?? [:]
         let state = groups.values.flatMap { $0 }.first { $0["udid"] as? String == destination.id }?["state"] as? String
         if state != "Booted" {
             _ = try await execute(runner, "/usr/bin/xcrun", ["simctl", "boot", destination.id], project: project, timeout: 60)

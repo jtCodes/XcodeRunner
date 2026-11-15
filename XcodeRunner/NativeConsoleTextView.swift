@@ -7,6 +7,7 @@ struct NativeConsoleTextView: NSViewRepresentable {
     let text: String
     let follow: Bool
     let onScrollAway: () -> Void
+    var accessibilityLabel = "Log output"
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -43,7 +44,7 @@ struct NativeConsoleTextView: NSViewRepresentable {
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isGrammarCheckingEnabled = false
         textView.allowsUndo = false
-        textView.setAccessibilityLabel("App console logs")
+        textView.setAccessibilityLabel(accessibilityLabel)
         scroll.documentView = textView
         context.coordinator.onScrollAway = onScrollAway
         scroll.onScrollAway = { [weak coordinator = context.coordinator] in coordinator?.scheduleScrollAway() }
@@ -57,6 +58,7 @@ struct NativeConsoleTextView: NSViewRepresentable {
         coordinator.isApplyingUpdate = true
         defer { coordinator.isApplyingUpdate = false }
         coordinator.onScrollAway = onScrollAway
+        textView.setAccessibilityLabel(accessibilityLabel)
         let changed = coordinator.previous != text
         let resumed = follow && !coordinator.followed
         coordinator.followed = follow

@@ -19,6 +19,7 @@ struct BuildProgress: Sendable {
     var warnings = 0
     var errors = 0
     var launchOnly = false
+    var archiving = false
     var lastOutput = Date()
 }
 
@@ -26,6 +27,8 @@ struct BuildProgress: Sendable {
 /// Report actual activities and phases instead of inventing a percentage.
 struct BuildOutputParser {
     private var pending = ""
+    private var diagnosticIDs: Set<String> = []
+    private(set) var diagnostics: [BuildDiagnostic] = []
     var progress = BuildProgress(phase: .building, activity: "Preparing build")
 
     mutating func consume(_ text: String) {
@@ -41,8 +44,10 @@ struct BuildOutputParser {
         let line = raw.trimmingCharacters(in: .whitespaces)
         guard !line.isEmpty else { return }
         progress.lastOutput = Date()
-        if line.contains("warning:") { progress.warnings += 1 }
-        if line.contains("error:") { progress.errors += 1 }
+        if let diagnostic = BuildDiagnostic.parse(line), diagnosticIDs.insert(diagnostic.id).inserted {
+            diagnostics.append(diagnostic)
+            if diagnostic.severity == .warning { progress.warnings += 1 } else { progress.errors += 1 }
+        }
         let actions: [(String, String)] = [
             ("SwiftCompile ", "Compiling Swift"), ("CompileSwift ", "Compiling Swift"),
             ("SwiftEmitModule ", "Emitting Swift module"), ("CompileC ", "Compiling"),

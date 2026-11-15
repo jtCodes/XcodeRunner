@@ -6,14 +6,17 @@ import Darwin
 final class ProjectWatcher {
     private var stream: FSEventStreamRef?
     private let onChange: () -> Void
-    init(root: String, onChange: @escaping () -> Void) {
+    convenience init(root: String, onChange: @escaping () -> Void) {
+        self.init(roots: [root], onChange: onChange)
+    }
+    init(roots: [String], onChange: @escaping () -> Void) {
         self.onChange = onChange
         var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         stream = FSEventStreamCreate(nil, { _, info, _, _, _, _ in
             guard let info else { return }
             Unmanaged<ProjectWatcher>.fromOpaque(info).takeUnretainedValue().onChange()
-        }, &context, [root] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 1,
-            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes))
+        }, &context, roots.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path } as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 1,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagWatchRoot))
         if let stream { FSEventStreamSetDispatchQueue(stream, .main); FSEventStreamStart(stream) }
     }
     deinit {
