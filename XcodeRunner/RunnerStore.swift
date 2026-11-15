@@ -17,6 +17,8 @@ final class RunnerStore: ObservableObject {
     }
     @Published var destinations: [RunDestination] = []
     @Published var changes: [UUID: [FileChange]] = [:]
+    @Published private(set) var gitRevisions: [UUID: UUID] = [:]
+    @Published private(set) var gitBranches: [UUID: String] = [:]
     @Published var scanErrors: [UUID: String] = [:]
     @Published var statuses: [UUID: String] = [:]
     @Published var logs: [UUID: String] = [:]
@@ -165,7 +167,7 @@ final class RunnerStore: ObservableObject {
             if lastFinishedID == id { lastFinishedID = nil }
             watchers[id] = nil; watcherRoots[id] = nil; gitStates[id] = nil; scanTasks[id]?.cancel(); scanTasks[id] = nil
             scanAgain.remove(id)
-            changes[id] = nil; logs[id] = nil; runIDs[id] = nil; scanErrors[id] = nil
+            changes[id] = nil; gitRevisions[id] = nil; gitBranches[id] = nil; logs[id] = nil; runIDs[id] = nil; scanErrors[id] = nil
             statuses[id] = nil; buildProgress[id] = nil; diagnostics[id] = nil; recommendedSchemes[id] = nil
         }
         projects.removeAll { removable.contains($0.id) }
@@ -190,13 +192,17 @@ final class RunnerStore: ObservableObject {
                 try await Task.sleep(for: .milliseconds(300))
                 let snapshot = try await GitChanges.read(root: project.rootPath)
                 guard !Task.isCancelled, projects.contains(where: { $0.id == id }) else { return }
+                if changes[id] != snapshot.changes || gitStates[id] != snapshot.fingerprint {
+                    gitRevisions[id] = UUID()
+                }
                 changes[id] = snapshot.changes
+                gitBranches[id] = snapshot.branch
                 gitStates[id] = snapshot.fingerprint
                 scanErrors[id] = nil
                 watch(project, gitDirectory: snapshot.gitDirectory)
             } catch {
                 guard !Task.isCancelled else { return }
-                changes[id] = nil; gitStates[id] = nil
+                changes[id] = nil; gitStates[id] = nil; gitBranches[id] = nil
                 scanErrors[id] = error.localizedDescription
             }
         }

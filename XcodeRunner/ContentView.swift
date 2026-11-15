@@ -4,6 +4,8 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject private var store: RunnerStore
     @State private var showChanges = true
+    @State private var reviewVisible = false
+    @State private var reviewChange: FileChange?
     @State private var showDestinations = false
     @State private var selectedProjectIDs: Set<UUID> = []
 
@@ -11,8 +13,16 @@ struct ContentView: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            if let project = store.selected { dashboard(project) }
-            else { emptyState }
+            if let project = store.selected {
+                HSplitView {
+                    dashboard(project).frame(minWidth: 320)
+                    if reviewVisible, let change = reviewChange {
+                        GitReviewView(store: store, project: project, change: change) { reviewVisible = false }
+                            .id("\(project.id)|\(change.path)")
+                            .frame(minWidth: 360, idealWidth: 620, maxWidth: 1200)
+                    }
+                }
+            } else { emptyState }
         }
         .navigationTitle("XcodeRunner")
         .frame(minWidth: 980, minHeight: 680)
@@ -27,10 +37,12 @@ struct ContentView: View {
                         ProjectToolbarStatus(store: store, project: project)
                     }
                     .padding(.horizontal, 14)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
             }
 
         }
+        .onChange(of: store.selection) { _, _ in reviewVisible = false; reviewChange = nil }
         .sheet(item: $store.pendingImport) { review in
             ProjectImportReviewView(review: review, cancel: store.cancelImportReview, confirm: store.confirmImport)
                 .interactiveDismissDisabled()
@@ -297,35 +309,21 @@ struct ContentView: View {
 
     private func settings(_ project: TrackedProject) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    if store.discovering.contains(project.id) {
-                        HStack { ProgressView().controlSize(.small); Text("Discovering schemes…").font(.callout) }
-                    } else {
-                        Picker("Scheme", selection: binding(project, \.scheme)) {
-                            Text("Choose an app scheme").tag("")
-                            if !project.scheme.isEmpty && !project.schemes.contains(project.scheme) {
-                                Text("\(project.scheme) · Unavailable").tag(project.scheme)
-                            }
-                            ForEach(pickerOptions(project.schemes), id: \.self) { name in
-                                Text(name + (store.recommendedSchemes[project.id] == name ? " · Suggested" : "")).tag(name)
-                            }
-                        }.labelsHidden()
-                    }
-                    if let suggested = store.recommendedSchemes[project.id], suggested != project.scheme {
-                        Button("Use suggested: \(suggested)") { store.update(project.id) { $0.scheme = suggested } }
-                            .buttonStyle(.plain).font(.caption).foregroundStyle(.tint)
-                    }
-                }.frame(width: 200, alignment: .leading)
-                    Picker("Configuration", selection: binding(project, \.configuration)) {
-                        Text("Choose configuration").tag("")
-                        if !project.configuration.isEmpty && !project.configurations.contains(project.configuration) {
-                            Text("\(project.configuration) · Unavailable").tag(project.configuration)
-                        }
-                        ForEach(pickerOptions(project.configurations), id: \.self) { Text($0).tag($0) }
-                    }.labelsHidden().frame(width: 110)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 12) {
+                    schemePicker(project).fixedSize(horizontal: true, vertical: false)
+                    configurationPicker(project)
                     Spacer(minLength: 0)
+                    ProjectVersionView(project: project).fixedSize(horizontal: true, vertical: false)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top, spacing: 12) {
+                        schemePicker(project)
+                        configurationPicker(project)
+                        Spacer(minLength: 0)
+                    }
                     ProjectVersionView(project: project)
+                }
             }.controlSize(.small)
             if store.deviceMessage != nil || (store.destinations.isEmpty && !store.loadingDevices) {
                 Divider()
@@ -342,6 +340,38 @@ struct ContentView: View {
             }
         }
         .disabled(store.activeID == project.id || store.queue.contains(project.id))
+    }
+
+    private func schemePicker(_ project: TrackedProject) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if store.discovering.contains(project.id) {
+                HStack { ProgressView().controlSize(.small); Text("Discovering schemes…").font(.callout) }
+            } else {
+                Picker("Scheme", selection: binding(project, \.scheme)) {
+                    Text("Choose an app scheme").tag("")
+                    if !project.scheme.isEmpty && !project.schemes.contains(project.scheme) {
+                        Text("\(project.scheme) · Unavailable").tag(project.scheme)
+                    }
+                    ForEach(pickerOptions(project.schemes), id: \.self) { name in
+                        Text(name + (store.recommendedSchemes[project.id] == name ? " · Suggested" : "")).tag(name)
+                    }
+                }.labelsHidden()
+            }
+            if let suggested = store.recommendedSchemes[project.id], suggested != project.scheme {
+                Button("Use suggested: \(suggested)") { store.update(project.id) { $0.scheme = suggested } }
+                    .buttonStyle(.plain).font(.caption).foregroundStyle(.tint)
+            }
+        }.frame(minWidth: 120, idealWidth: 200, maxWidth: 200, alignment: .leading)
+    }
+
+    private func configurationPicker(_ project: TrackedProject) -> some View {
+        Picker("Configuration", selection: binding(project, \.configuration)) {
+            Text("Choose configuration").tag("")
+            if !project.configuration.isEmpty && !project.configurations.contains(project.configuration) {
+                Text("\(project.configuration) · Unavailable").tag(project.configuration)
+            }
+            ForEach(pickerOptions(project.configurations), id: \.self) { Text($0).tag($0) }
+        }.labelsHidden().frame(width: 110)
     }
 
     private func runBar(_ project: TrackedProject) -> some View {
@@ -431,22 +461,64 @@ struct ContentView: View {
                     Label("Working tree clean", systemImage: "checkmark.circle").foregroundStyle(.secondary).padding(.vertical, 8)
                 } else {
                     DisclosureGroup("\(changes.count) files changed", isExpanded: $showChanges) {
-                        VStack(spacing: 0) {
-                            ForEach(changes.prefix(100)) { change in
-                                HStack {
-                                    Text(change.displayPath).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                                    Spacer()
-                                    Text(change.detail).font(.caption).foregroundStyle(change.kind == "Deleted" ? Color.red : Color.secondary)
-                                }.padding(.vertical, 5)
+                        LazyVStack(spacing: 0) {
+                            ForEach(changes) { change in
+                                Button {
+                                    reviewChange = change; reviewVisible = true
+                                } label: {
+                                    HStack {
+                                        Text(change.displayPath).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                                        Spacer()
+                                        Text(change.detail).font(.caption).lineLimit(1).layoutPriority(-1)
+                                            .foregroundStyle(change.kind == "Deleted" || change.kind == "Conflict" ? Color.red : Color.secondary)
+                                        changeEditTime(change)
+                                        changeLineCounts(change)
+                                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                    .padding(.horizontal, 6).padding(.vertical, 7)
+                                    .contentShape(Rectangle())
+                                    .background(reviewVisible && reviewChange?.path == change.path ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 5))
+                                }.buttonStyle(.plain).help("Review changes in \(change.path)")
                             }
-                            if changes.count > 100 { Text("And \(changes.count - 100) more files").font(.caption).foregroundStyle(.secondary) }
-                        }.padding(.top, 8).textSelection(.enabled)
+                        }.padding(.top, 8)
                     }
                 }
             } else { ProgressView("Reading Git status…").controlSize(.small) }
             Text("Uncommitted Git changes · Staged, unstaged, and untracked · Repository-relative paths")
                 .font(.caption).foregroundStyle(.tertiary)
         }
+    }
+
+    private func changeEditTime(_ change: FileChange) -> some View {
+        Group {
+            if let date = change.lastModified {
+                TimelineView(.periodic(from: .now, by: 60)) { _ in
+                    Text(date.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated)))
+                }
+                .help("Working file edited " + date.formatted(date: .complete, time: .complete))
+                .accessibilityLabel("File edited " + date.formatted(date: .abbreviated, time: .standard))
+            } else {
+                Text("—").help("Edit time unavailable: the working file is deleted or inaccessible")
+            }
+        }
+        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        .frame(width: 94, alignment: .trailing)
+    }
+
+    private func changeLineCounts(_ change: FileChange) -> some View {
+        Group {
+            if let stats = change.lineStats {
+                if stats.binary { Text("Binary").foregroundStyle(.secondary) }
+                else {
+                    HStack(spacing: 8) {
+                        Text("+\(stats.additions ?? 0)").foregroundStyle(.green).frame(width: 40, alignment: .trailing)
+                        Text("−\(stats.deletions ?? 0)").foregroundStyle(.red).frame(width: 40, alignment: .trailing)
+                    }.help("Added and deleted lines compared with HEAD")
+                }
+            } else { Text("—").foregroundStyle(.secondary).help("Line counts unavailable for this file") }
+        }
+        .font(.caption.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.7)
+        .frame(width: 88, alignment: .trailing)
     }
 
     private func pickerOptions(_ values: [String]) -> [String] {

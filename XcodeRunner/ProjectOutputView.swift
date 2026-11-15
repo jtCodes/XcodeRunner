@@ -20,13 +20,19 @@ struct ProjectOutputView: View {
     var body: some View {
         VStack(spacing: 0) {
             resizeHandle
-            HStack(spacing: 12) {
-                Picker("Output", selection: Binding(get: { tab }, set: { tab = $0; expanded = true })) {
-                    Text("Build Output").tag("build")
-                    Text("App Console").tag("console")
-                    Text("Issues (\(store.diagnostics[projectID]?.count ?? 0))").tag("issues")
-                }.pickerStyle(.segmented).labelsHidden().frame(width: 360)
-                Spacer()
+            HStack(spacing: 8) {
+                ViewThatFits(in: .horizontal) {
+                    outputTabs.pickerStyle(.segmented).frame(width: 360)
+                    outputTabs.pickerStyle(.menu).frame(width: 145)
+                }
+                Spacer(minLength: 0)
+                Label(store.gitBranches[projectID] ?? "—", systemImage: "arrow.triangle.branch")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(width: 90, alignment: .trailing)
+                    .opacity(store.gitBranches[projectID] == nil ? 0 : 1)
+                    .help(store.gitBranches[projectID].map { "Git branch: " + $0 } ?? "Git branch unavailable")
+                    .accessibilityHidden(store.gitBranches[projectID] == nil)
                 Button { expanded.toggle() } label: {
                     Image(systemName: "rectangle.bottomthird.inset.filled")
                         .foregroundStyle(expanded ? Color.accentColor : Color.secondary)
@@ -35,7 +41,7 @@ struct ProjectOutputView: View {
                 .buttonStyle(.plain)
                 .help(expanded ? "Collapse output (⇧⌘Y)" : "Expand output (⇧⌘Y)")
                 .accessibilityLabel(expanded ? "Collapse output" : "Expand output")
-            }.padding(.horizontal, 20).padding(.vertical, 6)
+            }.padding(.horizontal, 12).padding(.vertical, 6)
                 Group {
                     if tab == "issues" {
                         RunIssuesView(issues: store.diagnostics[projectID] ?? [],
@@ -74,6 +80,14 @@ struct ProjectOutputView: View {
             if active == projectID { tab = "build" }
         }
     }
+    private var outputTabs: some View {
+        Picker("Output", selection: Binding(get: { tab }, set: { tab = $0; expanded = true })) {
+            Text("Build Output").tag("build")
+            Text("App Console").tag("console")
+            Text("Issues (\(store.diagnostics[projectID]?.count ?? 0))").tag("issues")
+        }.labelsHidden()
+    }
+
     private var resizeHandle: some View {
         Rectangle().fill(Color(nsColor: .separatorColor).opacity(0.3))
             .frame(height: 6)
