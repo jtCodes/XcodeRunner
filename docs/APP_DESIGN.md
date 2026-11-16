@@ -1,0 +1,104 @@
+# App design and behavior
+
+Detailed workflow, implementation notes, and validation guidance for XcodeRunner. For a quick introduction and setup, see the [README](../README.md).
+
+A native macOS dashboard for the Codex → Run → check your iPhone workflow. Xcode must be installed and configured, but its window can stay closed while XcodeRunner builds other apps.
+
+## First run
+
+1. Open `XcodeRunner.xcodeproj` in Xcode. Choose **My Mac** and your signing team, then run XcodeRunner once.
+2. Click **Add Project** and choose a broad folder to recursively import all its Xcode projects, or select one `.xcworkspace` / `.xcodeproj`. When a scan finds multiple projects, a review popup lists the new projects with all checked. Uncheck any to exclude them, use Select All / Deselect All, then confirm Import; Cancel adds nothing. Folder import prefers workspaces over projects they actually reference, resolves nested workspace references, collapses equivalent workspaces, skips empty/broken workspaces, skips dependency/generated folders and symlinks, and preserves already saved projects and settings. Scheme discovery runs sequentially with progress shown in the sidebar. New projects prefer schemes backed by app targets or an app launch action, with the suggestion marked in the picker. Existing saved selections are preserved. If no runnable app scheme can be identified, choose one manually; dependency/library schemes are never selected just because they sort first. Re-import the folder later to pick up newly created projects.
+3. Choose an app scheme and configuration on the page, then a paired iPhone/iPad or iOS simulator in the top toolbar. The destination menu groups real devices above simulators, with available devices first. Opening the destination list automatically refreshes devices and simulators.
+4. Press **Run** in the toolbar, **Run → Run Selected Project**, or **⌘R** to build, install, and launch. Other projects can be queued while one is running. **Stop** cancels the current run; queued runs continue.
+
+The target is macOS-only, with a macOS 14 minimum. App Sandbox is disabled because the app needs to execute development tools and read project folders; Hardened Runtime is enabled.
+
+## Behavior
+
+- A background-free, monochrome version of the run/code emblem stays visible in the macOS menu bar and adapts to light/dark appearance. Small static corner badges reflect status: orange hammer for build/preparation, arrow for installation, lock for unlock wait, green play for a tracked running app, red exclamation for a failed run, green checkmark for a completed run, and gray stop for app exit/cancellation. Idle shows the unbadged emblem. Its tooltip identifies the current activity. It opens quick controls for saved projects, device selection, Run/Queue/Stop, Launch Again, and app status. Closing the main window keeps XcodeRunner and its console sessions alive. Open Window restores the full dashboard; Quit shuts down active commands and console forwarders. The menu and main window share the same project settings and build queue.
+
+- Select sidebar projects with Command-click or Shift-click, then use **Remove**, the context menu, or Delete to remove one or several saved entries. Source files and folders stay on disk. Active/queued projects are kept until their runs finish or are cancelled/unqueued.
+- The last selected project is restored when the app reopens, shared between the main window and menu bar. If it has been removed, the app selects a remaining project.
+- Projects and their settings persist in `~/Library/Application Support/XcodeRunner/projects.json`. Per-project build caches live alongside it in `DerivedData`.
+- **Git changes** and sidebar counts show staged, unstaged, untracked, renamed, deleted, and conflicted files under the project folder, using Git's ignore rules. Paths are relative to the repository root. Git changes are shown before the first run and remain until the repository's state changes; a successful build/run does not clear them. Folders outside a Git repository show a clear unavailable message.
+- Filesystem events refresh read-only Git status, never builds. Both source files and Git metadata are watched (including external worktree Git directories), and returning to the app refreshes status. Refreshes no longer hash entire ignored dependency trees. The sidebar keeps a fixed count slot and stable alphabetical order.
+- The run panel shows Prepare → Build → Install → Launch, current compiler/linker/signing/script activity, elapsed time, and observed build-activity / warning / error counts. A quiet tool shows time since its last output. These are parsed from Xcode’s text output; activity counts are observed actions, not completed tasks or a percentage estimate.
+- Builds are serialized across projects. Settings are locked for active or queued projects. Every queued run records its Git/source fingerprint when it actually starts.
+- **Launch Again** reopens the last successfully run app on the same destination when settings and the latest Git/source fingerprint match the last successful run, even if that run included uncommitted files. **Run** always builds, even when no source changes are detected.
+- The toolbar includes Run/Stop/Unqueue, a menu for Launch Again, the device picker, and a static app-status badge. The badge follows the console for the selected scheme/configuration/destination: green **App Running**, gray **App Exited**, amber **App Starting**, or gray **App Unknown** when disconnected or not tracked. It tracks the attached process, including background execution, and does not query apps launched independently.
+- **Issues** lists each run’s compiler warnings/errors and deployment failures, with All/Errors/Warnings filters. Warning/error totals open the corresponding filter; failures open Issues automatically. Click a file location for a read-only preview of the current file at its reported line, or choose Open in Xcode. Location-free messages remain copyable. The list resets on each Run/Launch Again and deduplicates repeated identical compiler diagnostics. Raw runtime console output is separate; the Issues list does not infer severity from arbitrary app log text.
+- **Build Output** contains build/deployment logs. **App Console** connects automatically during launch, streams live app output, and remains connected after the run finishes without blocking the build queue. Build Output and App Console share one native log viewer with incremental appends, wrapped lines, text selection, filter, copy, and pause/resume behavior. Each new build resets its viewer’s scroll/filter state. Scrolling back automatically pauses follow so incoming logs do not pull you to the bottom. Search filters visible lines; Pause Scrolling freezes the view while capture continues; Resume catches up. The menu provides Clear, Copy Visible/All, and Disconnect.
+- Physical-device consoles use `devicectl --console` with `OS_ACTIVITY_DT_MODE=enable`; simulators use `simctl launch --console-pty` with the equivalent child environment. Both run with a real terminal. Framework/SwiftUI messages depend on what the OS forwards; exact parity with Xcode is not guaranteed. This streams the launched app, not the entire device’s unified log, and does not attach a debugger.
+- Console sessions have no lifetime timeout, retain a bounded tail, and are replaced when the same project/app is launched again. Launch must be confirmed within 45 seconds before the last successful run is recorded. Disconnect, project removal, and app quit stop local forwarders. Disconnect uses a non-catchable signal to avoid deliberately forwarding termination to the app; it is not an app Stop/debugger control. Use Run/Launch Again to reconnect (which relaunches the app).
+- Physical-device installation and launch check `devicectl device info lockState`. A confirmed lock shows **Unlock Device** in the toolbar with a countdown in run progress, waits up to two minutes, and automatically continues after unlock. A lock-related deployment failure also waits and retries within the same bounded window. Stop cancels the wait; timeouts preserve the last successful run fingerprint. Unknown initial lock status does not block deployment, but a previously confirmed lock requires an explicit unlocked result before continuing. Simulators bypass this check.
+- Paired wireless devices can establish a connection on demand. “Paired · connects on run” is not a reachability guarantee; an offline device fails at installation/launch and leaves changes pending.
+
+## Prerequisites and current scope
+
+Use Xcode’s command-line tools selection (`xcode-select -p`), accept Xcode’s license, and finish its first-launch setup. Configure the target app’s signing in Xcode and perform any initial pairing/trust steps. Physical devices need Developer Mode. XcodeRunner uses existing signing configuration; it does not automatically change profiles or pass `-allowProvisioningUpdates`.
+
+This version supports local iOS/iPadOS app schemes with one runnable app target, plus iOS simulators. Workspaces without a configuration list fall back to Debug/Release. Remote SSH hosts, interactive debugging, custom configurations for those workspaces, and watch/tv/vision targets are outside the current scope. Archiving is supported as described below.
+
+## Lightweight verification
+
+Run `Scripts/check.sh` to typecheck the app source and run a small helper executable covering change snapshots, persistence, device-response parsing, product lookup, recursive folder import, streamed progress parsing, console launch acknowledgement/lifecycle, unlock wait/retry/timeout/cancellation, UTF-8 output, literal process arguments, and cancellation. It does not build the app or invoke a project build/install/launch. SwiftUI compiler macros require the compiler’s normal execution permissions.
+
+Source checks do not establish visual acceptance or successful device deployment. Validate those by running XcodeRunner and deploying a known working app to your paired iPhone.
+
+## Icon assets
+
+The app icon is configured through `Assets.xcassets/AppIcon.appiconset` for Debug and Release. Menu bar artwork uses a native vector version of the code/play emblem with no background tile, with status badges composited into one image. Original artwork and its built-in image-generation prompt are in `DesignAssets`. `Scripts/PreviewMenuBarIcons.swift` renders the offscreen badge contact sheet when compiled alongside `MenuBarIconRenderer.swift`; this does not build the app.
+
+## Version controls
+
+Version controls show the selected app target’s version and build number. **Edit Version…** offers manual values, Major/Minor/Patch bumps, and build +1. Saving updates each value at its source: literal settings across all configurations of the app target or Info.plist values, including mixed setups. The editor identifies when a shared plist is affected. **Save & Sync** also synchronizes unchanged displayed values to the target’s other configurations, so a prior Debug-only bump can be applied to Release. Project and XML plist formatting are preserved; binary plists retain their format. Saving refuses to overwrite externally changed files. Inherited/xcconfig settings and unsupported expressions remain read-only with a visible explanation; edit those in Xcode. Reading versions queries build settings without building the app.
+
+## Archiving
+
+Choose **Archive & Open** from the toolbar’s Run dropdown or the app’s Run menu (⇧⌘B). Before building, archiving synchronizes editable app version settings across the target’s configurations, including earlier bumps saved only to Debug. Archiving uses the selected scheme’s Archive configuration and a generic iOS device, independent of the Run configuration/device. Output, clickable diagnostics, progress, and Stop share the existing build pipeline. Completed app archives are saved under `~/Library/Developer/Xcode/Archives` and checked against the displayed app version/build before opening in Xcode for validation/distribution; **Open Last Archive in Xcode** retries opening the saved result. Archiving does not install, launch, upload, or change the Git list or last successful run fingerprint. Only one build/archive runs at a time; archive requires an idle queue.
+
+## Output panel
+
+The output area resizes by dragging its top divider; double-click the divider to reset its height. Drag the divider down near the bottom and release to snap closed, or use the collapse icon on the far right of the output bar or **View → Expand Output** (⇧⌘Y). Collapse and expansion animate, respecting Reduce Motion. The bar and tabs always remain visible; use its right-hand control, choose a tab, or drag the divider upward to expand it. Height and expansion state are remembered, and tab switches retain the same height. Collapsing output leaves builds and live console capture running. Selecting diagnostics reveals the panel.
+
+## Project icons and caching
+
+Project rows show the selected app target’s icon from its configured app-icon asset catalog. Source artwork is downsampled off the UI thread and works before the first run. An existing built app supplies the icon when source artwork is unavailable; otherwise a neutral fallback is shown. Icon discovery shares the read-only build-settings reader used by the version editor and never builds the app.
+
+Sidebar icons are cached in memory and on disk under `~/Library/Caches/XcodeRunner/ProjectIcons-v1`. Unchanged cached icons skip Xcode settings queries and asset scans after relaunch. Cache entries are separated by project, scheme, and configuration, and fingerprints detect changes to project/scheme files and source artwork. A stale thumbnail stays visible while refreshing, including when a project is temporarily unavailable. Build results, live device state, and Git changes continue to use live checks.
+
+## Git review
+
+Click any file in **Git changes** to open a resizable right-side review panel. Unified diffs show old/new line numbers, red deletions, green additions, hunk headers, and Swift syntax highlighting. **All Changes** compares HEAD with the working tree; **Unstaged** compares the index with the working tree; **Staged** compares HEAD with the index. Untracked text files preview as additions; renames and deletions remain reviewable. Binary and oversized files have explicit preview messages. The panel refreshes when Git/source changes are detected, preserves its scroll position while refreshing the same file, and supports selecting/copying text or copying the raw diff. Review uses read-only Git commands with external diff/text-conversion helpers disabled.
+
+Each Git file row shows fixed-width green `+` and red `−` line totals before opening review. Totals compare HEAD with the working tree, matching **All Changes**. Tracked counts use batched NUL-delimited Git numstat, with scoped rename queries to keep identical-file rename pairings accurate; untracked UTF-8 files count as additions. Binary files show **Binary**, and unavailable or oversized untracked previews show a dash. Count updates keep the row controls in place.
+
+Changed-file rows also show the working file’s last modification time in a fixed-width relative-time column. Hover for the exact date/time. Deleted or inaccessible files show a dash; Git commit/staging times are not substituted for edit times.
+
+## Branch display
+
+The bottom output bar shows the selected project's current Git branch immediately left of its collapse control, including while collapsed. It refreshes with Git status; detached HEAD shows a shortened revision. The branch has a fixed-width slot with the full name on hover. Narrow layouts use an output dropdown to keep the branch and collapse control visible.
+
+## Xcode archive handoff
+
+Archive handoff starts the selected Xcode installation through NSWorkspace with a clean GUI launch environment, waits up to a minute for it to finish launching, then explicitly opens the `.xcarchive`. An already-running Xcode receives the same native archive-open request. The handoff detects startup exits, timeouts, and immediate post-open crashes; failed handoffs keep the completed archive and reveal it in Finder with a retry action. A launch request being accepted is not treated as proof that Organizer is visible. If Xcode does not bring Organizer forward, choose **Window → Organizer → Archives** in Xcode.
+
+## Run dropdown
+
+The Run dropdown groups **Launch Again** and archive actions in an icon-led popover with short descriptions and the archive keyboard shortcut. **Open Last Archive** remains visible but disabled until an archive exists. The popover uses native Liquid Glass on macOS 26+, regular material on older supported systems, and an opaque background with Reduce Transparency enabled. Archive actions stay in the dropdown rather than occupying the build area.
+
+## Memory measurement
+
+A live development-session snapshot on November 16, 2026, on macOS 27 with Xcode 27 produced these physical-footprint readings from `vmmap -summary <pid>`:
+
+| Process/group | Footprint (MiB) |
+|---|---:|
+| Xcode main process | 450.9 |
+| `lldb-rpc-server` | 2,867.2 |
+| Other processes running from the Xcode app bundle | 140.4 |
+| **Xcode-location processes combined** | **3,458.5** |
+| XcodeRunner production process | 55.0 |
+
+The Xcode group was identified by executable paths under `/Applications/Xcode.app/Contents/`, including build, debugger, and XPC helpers. XcodeRunner 1.0.3 (1) was measured separately from `/Applications/XcodeRunner.app`, running standalone with `launchd` as its parent. The Debug build was no longer running. Three production-runner readings were all 55.0 MiB. Xcode's existing `lldb-rpc-server` remained resident from the development session. Physical footprint was used rather than virtual address-space size or a single resident-memory reading, which misses compressed memory and helper-process costs.
+
+These were existing, simultaneously running processes with different workloads and launch times. No apps were closed and no builds were started for the measurement. Summing these processes is an observed development-tool footprint, not proof that all that memory would be reclaimed by switching workflows. A publishable savings percentage requires matched projects, equivalent idle/build/run phases, the same standalone production build of XcodeRunner, and consistent accounting for compiler, debugger, and simulator services. The README intentionally gives the snapshot without a savings percentage.

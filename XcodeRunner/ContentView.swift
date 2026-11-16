@@ -217,18 +217,7 @@ struct ContentView: View {
                 }
                 .disabled(!store.canRun(project))
                 .help("Build, install, and launch the selected scheme")
-                Menu {
-                    Button("Archive → Open in Xcode Organizer", systemImage: "archivebox") { store.archive(project) }
-                        .disabled(!store.canArchive(project))
-                    if project.lastArchivePath != nil {
-                        Button("Open Last Archive in Xcode", systemImage: "arrow.up.forward.app") { store.openLastArchive(project) }
-                    }
-                    Divider()
-                    Button("Launch Again", systemImage: "arrow.clockwise") { store.launchAgain(project) }
-                        .disabled(store.activeID != nil || !store.canLaunch(project))
-                } label: { Image(systemName: "chevron.down").frame(width: 16, height: 22).contentShape(Rectangle()) }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden)
-                .padding(.horizontal, 4).fixedSize().help("More run actions")
+                RunActionsMenu(store: store, project: project)
             }
         }
         .labelStyle(.titleAndIcon)
