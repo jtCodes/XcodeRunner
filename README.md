@@ -1,6 +1,6 @@
 # XcodeRunner
 
-<img width="1377" height="924" alt="Screenshot 2026-11-16 at 6 03 34 PM" src="https://github.com/user-attachments/assets/285bc93b-6c48-4853-9077-d2367ae9fd31" />
+<img width="1377" height="924" alt="Screenshot 2026-11-16 at 6 04 19 PM" src="https://github.com/user-attachments/assets/6d35b482-3570-4bfc-9ee1-888e1b225ef6" />
 
 **Review AI-generated changes. Test on your device. Keep Xcode closed.**
 
