@@ -258,8 +258,14 @@ final class RunnerStore: ObservableObject {
     func openLastArchive(_ project: TrackedProject) {
         guard let path = project.lastArchivePath else { return }
         Task {
-            do { _ = try await CommandRunner().run("/usr/bin/open", ["-a", "Xcode", path]) }
-            catch { message = "Could not open archive in Xcode: \(error.localizedDescription)\n\(path)" }
+            do {
+                try await XcodeArchiveOpener.open(URL(fileURLWithPath: path))
+                append("Archive sent to Xcode: \(path)\n", to: project.id)
+            } catch {
+                append("Could not open archive in Xcode: \(error.localizedDescription)\n\(path)\n", to: project.id)
+                message = "Could not open archive in Xcode: \(error.localizedDescription)\n\(path)"
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            }
         }
     }
     func canLaunch(_ project: TrackedProject) -> Bool {
@@ -412,10 +418,13 @@ final class RunnerStore: ObservableObject {
         statuses[project.id] = "Archive succeeded"
         lastFinishedID = project.id
         append("\n✓ Archive succeeded: \(plan.path.path)\nOpening in Xcode Organizer…\n", to: project.id)
-        do { _ = try await runner.run("/usr/bin/open", ["-a", "Xcode", plan.path.path]) }
-        catch {
-            append("Archive saved, but Xcode could not open it: \(error.localizedDescription)\nUse Open Last Archive in Xcode to retry.\n", to: project.id)
-            message = "Archive succeeded, but Xcode could not open it.\n\(plan.path.path)"
+        do {
+            try await XcodeArchiveOpener.open(plan.path, cancelled: { self.cancelRequested })
+            append("Archive sent to Xcode. If Organizer is not visible, choose Window → Organizer → Archives in Xcode.\n", to: project.id)
+        } catch {
+            append("Archive saved, but the Xcode handoff failed: \(error.localizedDescription)\nUse Open Last Archive in Xcode to retry.\n", to: project.id)
+            message = "Archive succeeded, but the Xcode handoff failed.\n\(error.localizedDescription)\n\(plan.path.path)"
+            NSWorkspace.shared.activateFileViewerSelecting([plan.path])
         }
     }
     func showIssues(_ projectID: UUID, filter: DiagnosticFilter = .all) {

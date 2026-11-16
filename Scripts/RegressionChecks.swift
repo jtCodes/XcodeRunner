@@ -5,7 +5,49 @@ struct RegressionChecks {
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw RunnerError.message("FAIL: " + message) }
     }
+    @MainActor
+    static func archiveHandoffChecks() async throws {
+        let archive = URL(fileURLWithPath: "/tmp/Archive With Spaces.xcarchive")
+        let cold = ArchiveDriverProbe(states: [.launching, .launching, .ready])
+        try await ArchiveHandoff.open(archive, driver: cold, readinessAttempts: 4, settleAttempts: 0, pause: { cold.advance() })
+        try require(cold.events == ["launch", "wait", "wait", "deliver"], "Cold Xcode launch finishes before the archive is delivered")
+        let warm = ArchiveDriverProbe(states: [.ready])
+        try await ArchiveHandoff.open(archive, driver: warm, readinessAttempts: 2, settleAttempts: 0, pause: { warm.advance() })
+        try require(warm.events == ["launch", "deliver"], "Already-running Xcode receives an explicit archive-open request")
+        let startupCrash = ArchiveDriverProbe(states: [.launching, .terminated])
+        var startupRejected = false
+        do { try await ArchiveHandoff.open(archive, driver: startupCrash, readinessAttempts: 3, settleAttempts: 0, pause: { startupCrash.advance() }) }
+        catch { startupRejected = true }
+        try require(startupRejected && !startupCrash.events.contains("deliver"), "Startup crashes never receive a file-open event or report handoff success")
+        let timeout = ArchiveDriverProbe(states: [.launching])
+        var timeoutRejected = false
+        do { try await ArchiveHandoff.open(archive, driver: timeout, readinessAttempts: 2, settleAttempts: 0, pause: { timeout.advance() }) }
+        catch { timeoutRejected = true }
+        try require(timeoutRejected && !timeout.events.contains("deliver"), "Xcode startup waits are bounded")
+        let openCrash = ArchiveDriverProbe(states: [.ready, .ready, .terminated])
+        var openRejected = false
+        do { try await ArchiveHandoff.open(archive, driver: openCrash, readinessAttempts: 2, settleAttempts: 2, pause: { openCrash.advance() }) }
+        catch { openRejected = true }
+        try require(openRejected && openCrash.events.contains("deliver"), "An immediate Xcode exit after archive delivery is reported as failure")
+        let cancelled = ArchiveDriverProbe(states: [.ready])
+        var cancellationRejected = false
+        do { try await ArchiveHandoff.open(archive, driver: cancelled, readinessAttempts: 2, settleAttempts: 0, cancelled: { true }) }
+        catch is CancellationError { cancellationRejected = true }
+        try require(cancellationRejected && cancelled.events.isEmpty, "Cancelling handoff avoids launching Xcode")
+        let clean = XcodeLaunchPolicy.environment(from: ["HOME": "/Users/test", "PATH": "/usr/bin", "DYLD_FRAMEWORK_PATH": "/bad", "DYLD_INSERT_LIBRARIES": "/bad/injection.dylib", "__XCODE_BUILT_PRODUCTS_DIR_PATHS": "/bad", "__CFBundleIdentifier": "runner", "IDE_TEST_HOST": "runner"])
+        try require(clean == ["HOME": "/Users/test", "PATH": "/usr/bin"], "Xcode startup never inherits runner debugger or framework-injection settings")
+        let selected = try XcodeLaunchPolicy.application(developerDirectory: "/Applications/Xcode Beta.app/Contents/Developer")
+        try require(selected.path == "/Applications/Xcode Beta.app", "Archive handoff targets the selected Xcode installation rather than an app name")
+        let selectedApp = try XcodeLaunchPolicy.application(developerDirectory: "/Applications/Xcode Beta.app")
+        try require(selectedApp == selected, "DEVELOPER_DIR also accepts an Xcode app path")
+        var toolsRejected = false
+        do { _ = try XcodeLaunchPolicy.application(developerDirectory: "/Library/Developer/CommandLineTools") }
+        catch { toolsRejected = true }
+        try require(toolsRejected, "Command Line Tools alone cannot masquerade as Xcode for archive opening")
+    }
+
     static func main() async throws {
+        try await archiveHandoffChecks()
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("XcodeRunner-check-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -566,4 +608,19 @@ struct RegressionChecks {
         try require(unknownOperations == 1, "An unavailable initial probe does not falsely assert a locked device")
     }
 
+}
+
+@MainActor
+private final class ArchiveDriverProbe: ArchiveOpenDriver {
+    let states: [ArchiveApplicationState]
+    private var index = 0
+    var events: [String] = []
+    var state: ArchiveApplicationState { states[min(index, states.count - 1)] }
+    init(states: [ArchiveApplicationState]) { self.states = states }
+    func launch() async throws { events.append("launch") }
+    func deliver(_ archive: URL) async throws {
+        guard state == .ready else { throw RunnerError.message("Archive delivered before Xcode was ready") }
+        events.append("deliver")
+    }
+    func advance() { events.append("wait"); index += 1 }
 }
