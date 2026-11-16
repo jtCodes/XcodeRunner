@@ -88,7 +88,8 @@ struct RegressionChecks {
         let infoFile = root.appendingPathComponent("VersionInfo.plist")
         let mixedInfo = try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "$(MARKETING_VERSION)", "CFBundleVersion": "1", "Unrelated": "preserve me"], format: .xml, options: 0)
         try mixedInfo.write(to: infoFile)
-        var fixtureSettings: [String: Any] = ["PROJECT_DIR": root.path, "INFOPLIST_FILE": "VersionInfo.plist", "MARKETING_VERSION": "1.0.2", "CURRENT_PROJECT_VERSION": "Marketing Version"]
+        let fixtureMarketingVersion = (versionObjects[versionID]!["buildSettings"] as! [String: Any])["MARKETING_VERSION"] as! String
+        var fixtureSettings: [String: Any] = ["PROJECT_DIR": root.path, "INFOPLIST_FILE": "VersionInfo.plist", "MARKETING_VERSION": fixtureMarketingVersion, "CURRENT_PROJECT_VERSION": "Marketing Version"]
         let mixedVersion = try ProjectVersion.read(settings: fixtureSettings, target: "XcodeRunner", path: versionPackage.path, configuration: "Debug")
         try require(mixedVersion.editable && mixedVersion.build == "1" && mixedVersion.projectKeys == ["MARKETING_VERSION"] && mixedVersion.plistKeys == ["CFBundleVersion"], "Mixed plist/build-settings versions remain editable despite unused nonnumeric build setting")
         try mixedVersion.save(version: "2.0.0", build: "2")
@@ -120,7 +121,7 @@ struct RegressionChecks {
         try versionOriginal.write(to: projectFile)
         try mixedInfo.write(to: infoFile)
         fixtureSettings["INFOPLIST_FILE"] = "VersionInfo.plist"
-        fixtureSettings["MARKETING_VERSION"] = "1.0.2"
+        fixtureSettings["MARKETING_VERSION"] = fixtureMarketingVersion
         let beforeBump = try ProjectVersion.read(settings: fixtureSettings, target: "XcodeRunner", path: versionPackage.path, configuration: "Debug")
         try beforeBump.editedSource(version: "2.26.2", build: "1").write(to: projectFile)
         fixtureSettings["MARKETING_VERSION"] = "2.26.2"
