@@ -1,5 +1,7 @@
 # XcodeRunner
 
+<img width="1377" height="924" alt="Screenshot 2026-11-16 at 6 03 34 PM" src="https://github.com/user-attachments/assets/285bc93b-6c48-4853-9077-d2367ae9fd31" />
+
 **Review AI-generated changes. Test on your device. Keep Xcode closed.**
 
 A lightweight native Mac companion for developers working with Codex, Cursor, VS Code, or another editor. Follow the code changes your AI tool makes, decide when to build, and validate the results on an iPhone, iPad, or simulator.
