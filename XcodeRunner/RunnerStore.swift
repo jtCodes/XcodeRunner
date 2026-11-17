@@ -531,6 +531,19 @@ final class RunnerStore: ObservableObject {
             _ = try await execute(runner, "/usr/bin/xcrun", ["simctl", "boot", destination.id], project: project, timeout: 60)
         }
         _ = try await execute(runner, "/usr/bin/xcrun", ["simctl", "bootstatus", destination.id, "-b"], project: project, timeout: 180)
-        _ = try await runner.run("/usr/bin/open", ["-a", "Simulator"])
+        let developer = ProcessInfo.processInfo.environment["DEVELOPER_DIR"]
+        let selectedDeveloper: String
+        if let developer, !developer.isEmpty { selectedDeveloper = developer }
+        else {
+            selectedDeveloper = try await runner.run("/usr/bin/xcode-select", ["-p"], mergeStandardError: false)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let xcode = try XcodeLaunchPolicy.application(developerDirectory: selectedDeveloper)
+        let candidates = ["Contents/Applications/DeviceHub.app", "Contents/Developer/Applications/Simulator.app"]
+        guard let application = candidates.map({ xcode.appendingPathComponent($0) })
+            .first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            throw RunnerError.message("The selected Xcode has no Device Hub or Simulator app: \(xcode.path)")
+        }
+        _ = try await runner.run("/usr/bin/open", ["-a", application.path])
     }
 }
